@@ -19,6 +19,6 @@ TCP 통신과 RS485(Modbus) 통신을 이용하여 모터를 제어하는 프로
 2. 소스 코드에서 목적지 IP 주소와 통신 포트(Port/ComPort)를 설정합니다.
 3. 제어 명령 코드를 실행하여 모터를 구동합니다.
 
-## power shell 코드 
+## powershell 코드 
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=[Environment]::GetFolderPath('Desktop'); & (Join-Path $p 'stm_tcp.ps1')"
