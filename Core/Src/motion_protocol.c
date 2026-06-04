@@ -198,11 +198,12 @@ static void Init(char *ans, size_t size)
 }
 
 /*
- * 01FP_1_1_0_0 Home 위치 저장.
+ * 01FP_1_1_0_0
  *
- * 현재는 실제 원점복귀가 아니라 STM 내부 software home이다.
+ * 현재 위치를 STM 내부 home 위치로 저장한다.
+ * 실제로 모터가 움직이는 함수가 아니다.
  */
-static void Home(char *ans, size_t size)
+static void SaveHome(char *ans, size_t size)
 {
     if (Motor_IsBusy() != 0U)
     {
@@ -210,20 +211,29 @@ static void Home(char *ans, size_t size)
         return;
     }
 
-#if (USE_HOME_SENSOR != 0U)
-    if (HomeSensor_IsDetected() == 0U)
-    {
-        snprintf(ans, size, "01E_HOME_SENSOR\r\n");
-        return;
-    }
-#endif
-
     Motor_SetHome();
 
     in_pos[0] = 0L;
     in_ok[0] = 1U;
 
     snprintf(ans, size, "01FP_1_1_S\r\n");
+}
+/*
+ * 01H
+ *
+ * 저장된 home 위치로 천천히 복귀한다.
+ * 현재는 software home 위치, 즉 pos 0으로 이동한다.
+ */
+static void GoHome(char *ans, size_t size)
+{
+    if (Motor_SendHome() == osOK)
+    {
+        snprintf(ans, size, "01H_S\r\n");
+    }
+    else
+    {
+        snprintf(ans, size, "01E_H_BUSY\r\n");
+    }
 }
 
 /*
@@ -275,7 +285,7 @@ static void Save(char *cmd, char *ans, size_t size)
 
         if (first_value == 0L)
         {
-            Home(ans, size);
+        	SaveHome(ans, size);
             return;
         }
 
@@ -313,7 +323,25 @@ static void Save(char *cmd, char *ans, size_t size)
 
         for (i = 0U; i < save_count; i++)
         {
-            out_pos[i] = (int32_t)strtol(word[3U + i], NULL, 10);
+            int32_t mm;
+
+            /*
+             * TCP에서 받은 값은 이제 motor unit이 아니라 mm이다.
+             *
+             * 예:
+             *   01FP_1_2_100_200_300
+             *
+             * 의미:
+             *   1번 위치 = 원점 기준 100mm
+             *   2번 위치 = 원점 기준 200mm
+             *   3번 위치 = 원점 기준 300mm
+             */
+            mm = (int32_t)strtol(word[3U + i], NULL, 10);
+
+            /*
+             * 내부 이동값은 motor unit으로 저장한다.
+             */
+            out_pos[i] = Motor_mmToUnit(mm);
             out_ok[i] = 1U;
         }
 
@@ -616,6 +644,10 @@ void MotionProtocol_ProcessCommand(
     else if (strcmp(cmd, "01D") == 0)
     {
         Release(response, response_size);
+    }
+    else if (strcmp(cmd, "01H") == 0)
+    {
+    	GoHome(response, response_size);
     }
     else
     {

@@ -12,67 +12,77 @@ extern "C" {
 /*
  * motor.h
  *
- * 역할:
- *   모터 제어 함수, 모터 상태, FreeRTOS Queue 명령 구조체를 정의한다.
- *
- * 현재 구조:
- *   TCP 명령
- *   -> motion_protocol.c
- *   -> MotorQueue
- *   -> StartMotorTask()
- *   -> motor.c
- *   -> motor_bus.c
- *   -> UART5 / RS485
- *   -> AIMotor
+ * TCP 명령
+ * -> motion_protocol.c
+ * -> MotorQueue
+ * -> StartMotorTask()
+ * -> motor.c
+ * -> motor_bus.c
+ * -> UART5 / RS485
+ * -> AIMotor
  */
-
 #define MOTOR_ID                    1U
 
 #define MOTOR_UNIT_PER_TURN         1000L
+
+/*
+ * 바퀴 지름 설정.
+ *
+ * 기계 도면에 있는 바퀴 파이 값을 여기에 넣는다.
+ * 단위는 0.1mm이다.
+ *
+ * 예:
+ *   50.0mm 바퀴  (50파이)  = 500
+ *   65.0mm 바퀴  (65파이)  = 650
+ *   100.0mm 바퀴 (100파이) = 1000
+ */
+#define WHEEL_DIA_MM_X10            500L
+
+/*
+ * 감속비 / 풀리비 보정.
+ *
+ * 모터 1바퀴 = 바퀴 1바퀴면 1 / 1 유지.
+ *
+ * 예:
+ *   모터 2바퀴 돌 때 바퀴 1바퀴면
+ *   DRIVE_RATIO_NUM = 2
+ *   DRIVE_RATIO_DEN = 1
+ */
+#define DRIVE_RATIO_NUM             1L
+#define DRIVE_RATIO_DEN             1L
+
 #define LIFT_MAX_RPM                1000U
 #define LIFT_MIN_PERCENT            10U
 #define LIFT_MAX_PERCENT            100U
 
 /*
  * PCB DI 출력 극성
- *   RESET = DI ON
- *   SET   = DI OFF
+ * RESET = DI ON
+ * SET   = DI OFF
  */
 #define MOTOR_GPIO_ON               GPIO_PIN_RESET
 #define MOTOR_GPIO_OFF              GPIO_PIN_SET
 
-#define MOTOR_ALARM_RESET_MS        500U
-
-/*
- * MotorQueue에 넣는 명령 종류
- */
 typedef enum
 {
     MOTOR_CMD_NONE = 0,
     MOTOR_CMD_MOVE = 1,
     MOTOR_CMD_STOP = 2,
     MOTOR_CMD_ESTOP = 3,
-    MOTOR_CMD_RELEASE = 4
+    MOTOR_CMD_RELEASE = 4,
+	MOTOR_CMD_HOME = 5
 } MotorCmdId_t;
 
-/*
- * MotorQueue에 들어가는 명령 데이터
- *
- * IOC에서 MotorQueue Item Size는 반드시 sizeof(MotorCommand_t)로 설정한다.
- */
 typedef struct
 {
-    uint32_t id;         /* MOTOR_CMD_MOVE, MOTOR_CMD_STOP 등 */
-    int32_t pos;         /* 목표 위치, motor unit */
-    uint32_t speed;      /* 속도 percent */
-    uint32_t acc_ms;     /* 가감속 시간 ms */
-    uint32_t start_ms;   /* 이동 전 대기 ms */
-    uint32_t wait_ms;    /* 이동 후 대기 ms */
+    uint32_t id;
+    int32_t pos;
+    uint32_t speed;
+    uint32_t acc_ms;
+    uint32_t start_ms;
+    uint32_t wait_ms;
 } MotorCommand_t;
 
-/*
- * 통신 디버그 정보
- */
 typedef struct
 {
     uint32_t uart_error;
@@ -89,9 +99,6 @@ typedef struct
 
 extern MotorDebug_t motor_debug;
 
-/*
- * STM 내부 모터 상태
- */
 typedef struct
 {
     uint8_t setup_done;
@@ -117,15 +124,9 @@ typedef struct
 } MotorState_t;
 
 extern MotorState_t motor_state;
-
-/*
- * IOC에서 생성한 Queue handle
- */
 extern osMessageQueueId_t MotorQueueHandle;
 
-/* ---------------------------------------------------------
- * motor.c 함수
- * --------------------------------------------------------- */
+/* motor.c */
 void Motor_InitIO(void);
 
 HAL_StatusTypeDef Motor_Setup(UART_HandleTypeDef *huart);
@@ -146,13 +147,18 @@ HAL_StatusTypeDef Motor_Release(UART_HandleTypeDef *huart);
 HAL_StatusTypeDef Motor_SetHome(void);
 HAL_StatusTypeDef Motor_ClearHome(void);
 
+HAL_StatusTypeDef Motor_ReadPos(UART_HandleTypeDef *huart, int32_t *pos);
+HAL_StatusTypeDef Motor_ReadDiff(UART_HandleTypeDef *huart, int32_t *diff);
+uint8_t Motor_CheckDone(UART_HandleTypeDef *huart);
+
+HAL_StatusTypeDef Motor_StartHome(UART_HandleTypeDef *huart);
+HAL_StatusTypeDef Motor_SaveHomeHere(UART_HandleTypeDef *huart);
+
 uint8_t Motor_HomeOk(void);
 uint8_t Motor_IsEStop(void);
 uint8_t Motor_IsBusy(void);
+int32_t Motor_mmToUnit(int32_t mm);
 
-/* ---------------------------------------------------------
- * freertos.c에서 구현하는 Queue 전송 함수
- * --------------------------------------------------------- */
 osStatus_t Motor_SendCmd(const MotorCommand_t *cmd);
 
 osStatus_t Motor_SendMove(
@@ -166,6 +172,7 @@ osStatus_t Motor_SendMove(
 osStatus_t Motor_SendStop(void);
 osStatus_t Motor_SendEStop(void);
 osStatus_t Motor_SendRelease(void);
+osStatus_t Motor_SendHome(void);
 
 #ifdef __cplusplus
 }

@@ -11,8 +11,7 @@ extern "C" {
 /*
  * motor_bus.h
  *
- * 역할:
- *   AIMotor RS485 / Modbus 통신만 담당한다.
+ * AIMotor RS485 / Modbus 통신만 담당한다.
  */
 
 void Bus_Rx(void);
@@ -27,6 +26,12 @@ HAL_StatusTypeDef Bus_Write32(
     UART_HandleTypeDef *huart,
     uint16_t reg,
     int32_t val
+);
+
+HAL_StatusTypeDef Bus_Read32(
+    UART_HandleTypeDef *huart,
+    uint16_t reg,
+    int32_t *val
 );
 
 #ifdef __cplusplus
