@@ -1,4 +1,4 @@
-# ⚙️ Motor Control Project (TCP & RS485)
+# ⚙️ Motor Control (TCP & RS485)
 
 TCP 통신과 RS485(Modbus) 통신을 이용하여 모터를 제어하는 프로젝트입니다. 별도의 프로그램 설치 없이 하드웨어를 원격 및 직렬로 제어할 수 있도록 구성했습니다.
 
