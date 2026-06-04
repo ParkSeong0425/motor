@@ -11,7 +11,7 @@ TCP 통신과 RS485(Modbus) 통신을 이용하여 모터를 제어하는 프로
 | 항목 | TCP 설정 | RS485 설정 |
 | :--- | :--- | :--- |
 | **연결 방식** | TCP/IP Client / Server | Serial (통신 포트) |
-| **통신 속도** | 115200 bps (Baudrate) |
+| **통신 속도** |             | 115200 bps (Baudrate) |
 | **프로토콜** | Modbus TCP  | Modbus RTU |
 
 ## 💻 사용 방법
