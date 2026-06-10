@@ -1,97 +1,32 @@
-# stm_tcp.ps1
-# 바탕화면에서 실행되어 STM32 보드로 TCP 제어 명령을 전송하는 스크립트
+# ⚙️ High-Performance Motor Control System (STM32 & FreeRTOS)
 
-Clear-Host
-Write-Host "=============================================" -ForegroundColor Cyan
-Write-Host "   STM32 TCP Motor Control Remote Terminal    " -ForegroundColor Cyan
-Write-Host "=============================================" -ForegroundColor Cyan
+본 프로젝트는 **STM32 MCU**와 **FreeRTOS(실시간 운영체제)**를 기반으로 구축되었으며, 차세대 산업용 고성능 서보 모터(**AIMotor**)를 **TCP/IP 네트워크 및 RS485(Modbus RTU) 직렬 통신**을 통해 원격 및 직렬로 제어하는 통합 임베디드 제어 시스템입니다.
 
-# 1. 통신 환경 설정 (보드 IP 및 포트 설정)
-$TargetIP = "192.168.1.100"   # STM32 보드의 IP 주소에 맞게 변경하세요
-$TargetPort = 5000            # STM32 TCP Server 포트 번호
+별도의 복잡한 제어 프로그램 설치 없이, **PC의 PowerShell 환경** 또는 독립적인 **RS485 CLI(Command Line Interface) 터미널** 환경을 통해 시스템 가동 상태를 모니터링하고 하드웨어를 정밀하게 제어할 수 있도록 설계되었습니다.
 
-Write-Host "[INFO] 연결 대상 보드: $TargetIP : $TargetPort" -ForegroundColor Yellow
+---
 
-# 2. 보드와 TCP 소켓 연결 시도
-try {
-    $socket = New-Object System.Net.Sockets.TcpClient
-    $ConnectResult = $socket.BeginConnect($TargetIP, $TargetPort, $null, $null)
-    $Wait = $ConnectResult.AsyncWaitHandle.WaitOne(2000, $true) # 2초 타임아웃
-    
-    if (-not $Wait) {
-        throw "연결 시간 초과 (Timeout)"
-    }
-    $socket.EndConnect($ConnectResult)
-    $stream = $socket.GetStream()
-    Write-Host "[SUCCESS] STM32 모터 제어 보드에 성공적으로 연결되었습니다." -ForegroundColor Green
-}
-catch {
-    Write-Host "[ERROR] 보드 연결 실패: $_" -ForegroundColor Red
-    Write-Host "[HINT] 배선 및 STM32 네트워크 설정을 확인하세요." -ForegroundColor Yellow
-    Exit
-}
+## 🚀 핵심 기능 (Key Features)
 
-# 3. 원격 모터 제어 루프
-$running = $true
-while ($running) {
-    Write-Host "`n---------------------------------------------"
-    Write-Host " 1. 모터 구동 (MOVE)"
-    Write-Host " 2. 모터 정지 (STOP)"
-    Write-Host " 3. 비상 정지 (ESTOP)"
-    Write-Host " 4. 서보 해제 (RELEASE)"
-    Write-Host " 5. 종료 (EXIT)"
-    Write-Host "---------------------------------------------"
-    $choice = Read-Host "원하는 제어 명령 번호를 입력하세요"
+* **FreeRTOS 멀티태스킹 아키텍처**: 내부 Task 간 병렬 처리를 구현하여 모터 제어 주기 및 통신 데이터 정밀도 최적화
+  * `MotorTask`: 가·감속 모션 프로파일 연산 및 큐(Queue) 기반 실시간 동기식 명령 처리
+  * `CliTask` / `TcpTask`: 사용자 터미널 입력 및 원격 TCP 소켓 스트림 파싱 및 상태 피드백
+* **RS485 Modbus RTU 프로토콜 하드웨어 제어**: AIMotor 전용 레지스터 맵(위치, 속도, 구동 가속도, 제어 모드 등)을 통한 32비트 고정밀 서보 제어 구현
+* **강력한 CLI 터미널 환경**: `huart6`를 활용한 전용 명령어 인터페이스 환경 제공으로 직관적인 현장 디버깅 지원
+* **원격 TCP/IP 통신 인터페이스**: 네트워크망(Ethernet/Wi-Fi)을 통해 원격지에서도 지연 없이 구동 제어 및 모터 RPM/위치 트래킹 가능
 
-    switch ($choice) {
-        "1" {
-            $mm = Read-Host "이동 거리 입력 (mm)"
-            $speed = Read-Host "속도 비율 입력 (1~100 %)"
-            
-            # 텍스트 형식 패킷 포맷 정의: "MOVE,<mm>,<speed>\n"
-            $cmdText = "MOVE,$mm,$speed`n"
-        }
-        "2" {
-            $cmdText = "STOP`n"
-        }
-        "3" {
-            $cmdText = "ESTOP`n"
-        }
-        "4" {
-            $cmdText = "RELEASE`n"
-        }
-        "5" {
-            $cmdText = "EXIT`n"
-            $running = $false
-            continue
-        }
-        default {
-            Write-Host "[WARN] 잘못된 입력입니다. 다시 선택하세요." -ForegroundColor Yellow
-            continue
-        }
-    }
+---
 
-    # TCP 데이터 송신
-    try {
-        $sendData = [System.Text.Encoding]::ASCII.GetBytes($cmdText)
-        $stream.Write($sendData, 0, $sendData.Length)
-        Write-Host "[SEND] 전송된 명령: $($cmdText.TrimEnd())" -ForegroundColor Magenta
-        
-        # 보드로부터 응답 메시지 수신 (1024 바이트 버퍼)
-        $buffer = New-Object Byte[] 1024
-        $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-        if ($bytesRead -gt 0) {
-            $response = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $bytesRead)
-            Write-Host "[RECEIVE] 보드 상태 응답: $($response.TrimEnd())" -ForegroundColor Green
-        }
-    }
-    catch {
-        Write-Host "[ERROR] 데이터 송수신 중 오류 발생: $_" -ForegroundColor Red
-        $running = $false
-    }
-}
+## 🛠️ 하드웨어 및 시스템 통신 사양
 
-# 4. 소켓 리소스 해제
-$stream.Close()
-$socket.Close()
-Write-Host "[INFO] 원격 제어 터미널 세션을 종료합니다." -ForegroundColor Cyan
+| 항목 | TCP/IP 원격 제어 단 | RS485 (Modbus RTU) 모터 구동 단 |
+| :--- | :--- | :--- |
+| **연결 방식** | TCP/IP Server (보드) & Client (PC) | Half-Duplex RS485 직렬 포트 (`huart5`) |
+| **물리 계층 Pin** | RJ-45 Ethernet 포트 | PD13 (DIR Pin), PD5(TX), PD6(RX) |
+| **통신 속도** | 10/100 Mbps (Auto-Negotiation) | **115,200 bps** (Baudrate) |
+| **프로토콜** | Custom TCP String Command | **Modbus RTU (With CRC16 검증)** |
+| **주요 제어 대상** | PowerShell / 원격 소프트웨어 인터페이스 | 고정밀 산업용 서보 디바이스 (**AIMotor**) |
+
+---
+
+## 🏗️ 시스템 아키텍처 및 소
