@@ -2,20 +2,24 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : STM32 + W6100 TCP command server + FreeRTOS
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
   *
-  * 핵심 방향:
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
   *
-  * 1. STM이 켜지면 GPIO 초기화 후 Motor_GPIO_InitState()로 DI 핀을 OFF 상태로 둔다.
-  * 2. 모터 전원이 꺼져 있어도 TCP 서버는 정상 동작해야 한다.
-  * 3. main()에서 Motor_InitSetup()을 자동 호출하지 않는다.
-  * 4. FreeRTOS 이후 TCP 처리는 freertos.c의 TcpTask가 담당한다.
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "i2c.h"
 #include "spi.h"
 #include "usart.h"
 #include "gpio.h"
@@ -25,45 +29,34 @@
 #include "wizchip_conf.h"
 #include "wiz6100_port.h"
 #include "motor.h"
+
+#include "mac_eeprom.h"
+#include "fram.h"
+#include "cli.h"
+#include "rs485.h"
+
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
-uint8_t txsize[8] = {2, 2, 2, 2, 2, 2, 2, 2};
-uint8_t rxsize[8] = {2, 2, 2, 2, 2, 2, 2, 2};
-
-wiz_NetInfo netinfo_set =
-{
-    .mac = {0x00, 0x08, 0xDC, 0x12, 0x34, 0x56},
-    .ip  = {172, 20, 0, 192},
-    .sn  = {255, 255, 255, 0},
-    .gw  = {0, 0, 0, 0},
-    .dns = {0, 0, 0, 0},
-    .ipmode = NETINFO_STATIC_V4
-};
-
-wiz_NetInfo netinfo_get;
-
-int8_t wiz_init_result = -99;
-int8_t id_result = -99;
-uint8_t wiz_id[6] = {0};
-
-uint8_t sys_unlock = SYS_NET_LOCK;
-uint8_t sys_lock_status = 0;
 
 /* USER CODE END PV */
 
@@ -71,34 +64,11 @@ uint8_t sys_lock_status = 0;
 void SystemClock_Config(void);
 void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
-static void W6100_NetworkInit(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-static void W6100_NetworkInit(void)
-{
-    W6100_Reset();
-    W6100_RegisterCallback();
-
-    id_result = ctlwizchip(CW_GET_ID, wiz_id);
-
-    wiz_init_result = wizchip_init(txsize, rxsize);
-
-    if (wiz_init_result != 0)
-    {
-        Error_Handler();
-    }
-
-    sys_unlock = SYS_NET_LOCK;
-    ctlwizchip(CW_SYS_UNLOCK, &sys_unlock);
-
-    ctlwizchip(CW_GET_SYSLOCK, &sys_lock_status);
-
-    wizchip_setnetinfo(&netinfo_set);
-    wizchip_getnetinfo(&netinfo_get);
-}
 
 /* USER CODE END 0 */
 
@@ -133,17 +103,16 @@ int main(void)
   MX_GPIO_Init();
   MX_UART5_Init();
   MX_SPI1_Init();
+  MX_I2C1_Init();
+  MX_SPI3_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-
   /*
-   * 여기서 Motor_InitSetup(&huart5)를 호출하지 않는다.
-   *
-   * 이유:
-   * 모터 전원이 꺼져 있거나 드라이버가 알람이면 Modbus 초기화가 실패할 수 있고,
-   * 그 실패 때문에 TCP 서버까지 못 켜지면 안 된다.
+   * UART5 CLI RS485 초기화
+   * UART5 = CLI
+   * PD13 / RS485_2 = CLI RS485 방향 제어
    */
-  W6100_NetworkInit();
-
+  RS485_Init();
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -222,6 +191,7 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
 /* USER CODE END 4 */
 
 /**

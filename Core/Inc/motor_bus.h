@@ -8,31 +8,28 @@ extern "C" {
 #include "main.h"
 #include <stdint.h>
 
+void MotorBus_SetRx(void);
+
+HAL_StatusTypeDef MotorBus_WriteU16(UART_HandleTypeDef *huart,
+                                    uint16_t reg,
+                                    uint16_t value);
+
+HAL_StatusTypeDef MotorBus_WriteI32(UART_HandleTypeDef *huart,
+                                    uint16_t reg,
+                                    int32_t value);
+
+HAL_StatusTypeDef MotorBus_ReadI32(UART_HandleTypeDef *huart,
+                                   uint16_t reg,
+                                   int32_t *value);
+
 /*
- * motor_bus.h
- *
- * AIMotor RS485 / Modbus 통신만 담당한다.
+ * Old short names.
+ * motor.c already uses these names.
  */
-
-void Bus_Rx(void);
-
-HAL_StatusTypeDef Bus_Write16(
-    UART_HandleTypeDef *huart,
-    uint16_t reg,
-    uint16_t val
-);
-
-HAL_StatusTypeDef Bus_Write32(
-    UART_HandleTypeDef *huart,
-    uint16_t reg,
-    int32_t val
-);
-
-HAL_StatusTypeDef Bus_Read32(
-    UART_HandleTypeDef *huart,
-    uint16_t reg,
-    int32_t *val
-);
+#define Bus_Rx       MotorBus_SetRx
+#define Bus_Write16  MotorBus_WriteU16
+#define Bus_Write32  MotorBus_WriteI32
+#define Bus_Read32   MotorBus_ReadI32
 
 #ifdef __cplusplus
 }

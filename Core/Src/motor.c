@@ -1,5 +1,6 @@
 #include "motor.h"
 #include "motor_bus.h"
+#include <stdio.h>
 
 /*
  * motor.c
@@ -12,12 +13,15 @@
 #define REG_CONTROL_MODE             0x0200
 
 #define REG_DI1_FUNC                 0x0302
+#define REG_DI1_LOGIC                0x0303
+#define REG_DI2_FUNC                 0x0304
 #define REG_START                    0x0305
 #define REG_DI3_FUNC                 0x0306
 #define REG_DI3_LOGIC                0x0307
 
 #define REG_POS_SOURCE               0x0500
 
+#define REG_RUN_MODE                 0x1100
 #define REG_END_SEG                  0x1101
 #define REG_MOVE_TYPE                0x1104
 #define REG_TARGET_POS               0x110C
@@ -40,14 +44,19 @@
 
 /* AIMotor 설정값 */
 #define VAL_POS_MODE                 1U
+
 #define VAL_DI_SERVO                 1U
+#define VAL_DI2_POS_START            28U
 #define VAL_DI_ESTOP                 34U
 
 #define VAL_POS_INTERNAL             2U
+#define VAL_RUN_SINGLE               0U
 #define VAL_END_SEG1                 1U
 #define VAL_MOVE_ABS                 1U
 
 #define MOTOR_DONE_DIFF_LIMIT        100L
+
+
 
 MotorDebug_t motor_debug;
 MotorState_t motor_state;
@@ -151,6 +160,7 @@ int32_t Motor_mmToUnit(int32_t mm)
     return (int32_t)(unit * sign);
 }
 
+//현재는 완료 판단용이 아니라 timeout 기준값으로 사용한다.
 static uint32_t GuessMs(int32_t now, int32_t target, uint16_t rpm, uint16_t acc_ms)
 {
     int32_t diff;
@@ -277,6 +287,20 @@ static HAL_StatusTypeDef StartOn(UART_HandleTypeDef *huart)
 {
     HAL_StatusTypeDef st;
 
+    /*
+     * Multi-segment start 신호를 확실히 주기 위해
+     * 0 -> 1 edge를 만든다.
+     */
+    st = Bus_Write16(huart, REG_START, 0U);
+
+    if (st != HAL_OK)
+    {
+        motor_state.last_hal = st;
+        return st;
+    }
+
+    HAL_Delay(20U);
+
     st = Bus_Write16(huart, REG_START, 1U);
     motor_state.last_hal = st;
 
@@ -290,14 +314,74 @@ HAL_StatusTypeDef Motor_Setup(UART_HandleTypeDef *huart)
 
     const RegPair_t list[] =
     {
-        { REG_CONTROL_MODE, VAL_POS_MODE     },
-        { REG_DI1_FUNC,     VAL_DI_SERVO     },
-        { REG_START,        0U               },
-        { REG_DI3_FUNC,     VAL_DI_ESTOP     },
-        { REG_DI3_LOGIC,    0U               },
-        { REG_POS_SOURCE,   VAL_POS_INTERNAL },
-        { REG_END_SEG,      VAL_END_SEG1     },
-        { REG_WAIT,         0U               }
+        /*
+         * H02_00 = 1
+         * Position control mode
+         */
+        { REG_CONTROL_MODE, VAL_POS_MODE        },
+
+        /*
+         * H03_02 = 1
+         * DI1 = Servo enable
+         */
+        { REG_DI1_FUNC,     VAL_DI_SERVO        },
+
+        /*
+         * H03_03 = 0
+         * DI1 positive logic
+         */
+        { REG_DI1_LOGIC,    0U                  },
+
+        /*
+         * H03_04 = 28
+         * DI2 = multi-segment position run enable
+         *
+         * 이 설정이 빠지면 H03_05를 1로 써도
+         * 위치 운전 start로 안 먹을 수 있다.
+         */
+        { REG_DI2_FUNC,     VAL_DI2_POS_START   },
+
+        /*
+         * H03_05 = 0
+         * Start OFF
+         */
+        { REG_START,        0U                  },
+
+        /*
+         * H03_06 = 34
+         * DI3 = emergency stop
+         */
+        { REG_DI3_FUNC,     VAL_DI_ESTOP        },
+
+        /*
+         * H03_07 = 0
+         * DI3 positive logic
+         */
+        { REG_DI3_LOGIC,    0U                  },
+
+        /*
+         * H05_00 = 2
+         * Position command source = internal multi-segment command
+         */
+        { REG_POS_SOURCE,   VAL_POS_INTERNAL    },
+
+        /*
+         * H11_00 = 0
+         * Single cycle
+         */
+        { REG_RUN_MODE,     VAL_RUN_SINGLE      },
+
+        /*
+         * H11_01 = 1
+         * Use segment 1 only
+         */
+        { REG_END_SEG,      VAL_END_SEG1        },
+
+        /*
+         * H11_16 = 0
+         * Wait time 0
+         */
+        { REG_WAIT,         0U                  }
     };
 
     if (huart == NULL)
@@ -320,6 +404,8 @@ HAL_StatusTypeDef Motor_Setup(UART_HandleTypeDef *huart)
             motor_state.last_hal = st;
             return st;
         }
+
+        HAL_Delay(10U);
     }
 
     motor_state.setup_done = 1U;
@@ -460,12 +546,23 @@ HAL_StatusTypeDef Motor_Start(
         return st;
     }
 
+    /*
+     * 여기까지 왔다는 것은:
+     * 1. 이동 파라미터 쓰기 성공
+     * 2. ServoOn 실행
+     * 3. StartOn 쓰기 성공
+     */
+    printf("[MOTOR_START] target=%ld rpm=%u acc=%u start_ok\r\n",
+           (long)target,
+           rpm,
+           acc_ms);
+
     motor_debug.last_pos = target;
     motor_state.error = 0U;
     motor_state.last_hal = HAL_OK;
 
     return HAL_OK;
-}
+	}
 HAL_StatusTypeDef Motor_StartHome(UART_HandleTypeDef *huart)
 {
     HAL_StatusTypeDef st;
@@ -593,42 +690,33 @@ uint8_t Motor_CheckDone(UART_HandleTypeDef *huart)
     int32_t gap;
 
     /*
-     * 1차 판단:
-     * H0B_15 위치 편차값으로 완료 판단.
+     * 현재 네 모터에서는 H0B_15 위치 편차값(diff)이 0으로 나오는 경우가 있다.
+     * diff=0만 보고 완료 처리하면 모터가 움직이기 전에
+     * Motor_Done() -> StartOff()가 실행된다.
+     *
+     * 따라서 diff는 디버그용으로만 읽고,
+     * 실제 완료 판단은 현재 위치와 목표 위치의 차이로만 한다.
      */
     if (Motor_ReadDiff(huart, &diff) == HAL_OK)
     {
-        if (diff < 0L)
-        {
-            diff = -diff;
-        }
-
-        if (diff <= MOTOR_DONE_DIFF_LIMIT)
-        {
-            return 1U;
-        }
+        (void)diff;
     }
 
-    /*
-     * 2차 판단:
-     * H0B_07 현재 위치가 목표 위치 근처인지 확인.
-     *
-     * H0B_15 읽기 실패나 값 이상이 있어도
-     * 실제 위치가 목표 근처라면 완료로 본다.
-     */
-    if (Motor_ReadPos(huart, &pos) == HAL_OK)
+    if (Motor_ReadPos(huart, &pos) != HAL_OK)
     {
-        gap = pos - motor_state.last_target;
+        return 0U;
+    }
 
-        if (gap < 0L)
-        {
-            gap = -gap;
-        }
+    gap = pos - motor_state.last_target;
 
-        if (gap <= MOTOR_DONE_DIFF_LIMIT)
-        {
-            return 1U;
-        }
+    if (gap < 0L)
+    {
+        gap = -gap;
+    }
+
+    if (gap <= MOTOR_DONE_DIFF_LIMIT)
+    {
+        return 1U;
     }
 
     return 0U;

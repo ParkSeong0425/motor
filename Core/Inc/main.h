@@ -69,8 +69,14 @@ void Error_Handler(void);
 #define LAMP_LED_GPIO_Port GPIOC
 #define W610_CS_Pin GPIO_PIN_0
 #define W610_CS_GPIO_Port GPIOA
+#define FRAM_CS_Pin GPIO_PIN_4
+#define FRAM_CS_GPIO_Port GPIOA
+#define RS485_3_Pin GPIO_PIN_12
+#define RS485_3_GPIO_Port GPIOF
 #define W610_INT_Pin GPIO_PIN_10
 #define W610_INT_GPIO_Port GPIOE
+#define RS485_2_Pin GPIO_PIN_13
+#define RS485_2_GPIO_Port GPIOD
 #define W610_RST_Pin GPIO_PIN_0
 #define W610_RST_GPIO_Port GPIOE
 
