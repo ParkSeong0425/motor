@@ -5,8 +5,7 @@
 #include "i2c.h"
 #include "spi.h"
 
-#include "mac_eeprom.h"
-#include "fram.h"
+#include "net.h"
 #include "motor.h"
 
 #include <stdio.h>

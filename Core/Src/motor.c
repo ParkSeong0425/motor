@@ -1,62 +1,62 @@
 #include "motor.h"
-#include "motor_bus.h"
+#include "rs485.h"
 #include <stdio.h>
+#include <stdint.h>
 
-/*
- * motor.c
- *
- * 모터 동작 순서를 관리한다.
- * RS485 통신은 motor_bus.c가 담당한다.
- */
+/* AIMotor register */
+#define REG_CONTROL_MODE       0x0200
 
-/* AIMotor Register */
-#define REG_CONTROL_MODE             0x0200
+#define REG_DI1_FUNC           0x0302
+#define REG_DI1_LOGIC          0x0303
+#define REG_DI2_FUNC           0x0304
+#define REG_START              0x0305
+#define REG_DI3_FUNC           0x0306
+#define REG_DI3_LOGIC          0x0307
 
-#define REG_DI1_FUNC                 0x0302
-#define REG_DI1_LOGIC                0x0303
-#define REG_DI2_FUNC                 0x0304
-#define REG_START                    0x0305
-#define REG_DI3_FUNC                 0x0306
-#define REG_DI3_LOGIC                0x0307
+#define REG_POS_SOURCE         0x0500
 
-#define REG_POS_SOURCE               0x0500
+#define REG_HOME_TRIGGER       0x051E  /* H05_30 */
+#define REG_HOME_MODE          0x051F  /* H05_31 */
+#define REG_HOME_FAST_SPEED    0x0520  /* H05_32 */
+#define REG_HOME_SLOW_SPEED    0x0521  /* H05_33 */
+#define REG_HOME_ACC           0x0522  /* H05_34 */
+#define REG_HOME_TIMEOUT       0x0523  /* H05_35 */
 
-#define REG_RUN_MODE                 0x1100
-#define REG_END_SEG                  0x1101
-#define REG_MOVE_TYPE                0x1104
-#define REG_TARGET_POS               0x110C
-#define REG_SPEED                    0x110E
-#define REG_ACC                      0x110F
-#define REG_WAIT                     0x1110
+#define REG_RUN_MODE           0x1100
+#define REG_END_SEG            0x1101
+#define REG_MOVE_TYPE          0x1104
+#define REG_TARGET_POS         0x110C
+#define REG_SPEED              0x110E
+#define REG_ACC                0x110F
+#define REG_WAIT               0x1110
 
-/*
- * 01H 원점 탐색 거리.
- * 현재 위치에서 MI 방향으로 충분히 크게 움직이면서 센서를 찾는다.
- * 방향이 반대면 - 부호를 + 로 바꾸면 된다.
- */
-#define HOME_FIND_POS                (-100000L) // (100000L) 시계방향으로 안돌 때 이렇게 적용
-#define HOME_FIND_SPEED              10U
-#define HOME_FIND_ACC_MS             1000U
+#define REG_REAL_POS           0x0B07
+#define REG_POS_DIFF           0x0B0F
 
-/* Monitor Register */
-#define REG_REAL_POS                 0x0B07
-#define REG_POS_DIFF                 0x0B0F
+/* AIMotor value */
+#define VAL_POS_MODE           1U
+#define VAL_DI_SERVO           1U
+#define VAL_DI2_START          28U
+#define VAL_DI_HOME_SWITCH     31U
+#define VAL_DI_ESTOP           34U
 
-/* AIMotor 설정값 */
-#define VAL_POS_MODE                 1U
+#define VAL_POS_INTERNAL       2U
+#define VAL_RUN_SINGLE         0U
+#define VAL_END_SEG1           1U
+#define VAL_MOVE_ABS           1U
 
-#define VAL_DI_SERVO                 1U
-#define VAL_DI2_POS_START            28U
-#define VAL_DI_ESTOP                 34U
+#define VAL_HOME_COMM_START    4U
 
-#define VAL_POS_INTERNAL             2U
-#define VAL_RUN_SINGLE               0U
-#define VAL_END_SEG1                 1U
-#define VAL_MOVE_ABS                 1U
+/* Home sensor test setting */
+#define HOME_SENSOR_DI2        1U
+#define HOME_MODE              1U     /* 0: forward, 1: reverse */
+#define HOME_FAST_RPM          100U
+#define HOME_SLOW_RPM          20U
+#define HOME_ACC_MS            200U
+#define HOME_TIMEOUT_MS        60000U
 
-#define MOTOR_DONE_DIFF_LIMIT        100L
-
-
+#define DONE_GAP_LIMIT         100L
+#define USE_COMM_SERVO_ON      1U
 
 MotorDebug_t motor_debug;
 MotorState_t motor_state;
@@ -69,17 +69,15 @@ typedef struct
     uint16_t val;
 } RegPair_t;
 
-#define DI1_ON()     HAL_GPIO_WritePin(DI_1_GPIO_Port, DI_1_Pin, MOTOR_GPIO_ON)
-#define DI1_OFF()    HAL_GPIO_WritePin(DI_1_GPIO_Port, DI_1_Pin, MOTOR_GPIO_OFF)
+#define DI1_ON()   HAL_GPIO_WritePin(DI_1_GPIO_Port, DI_1_Pin, MOTOR_GPIO_ON)
+#define DI1_OFF()  HAL_GPIO_WritePin(DI_1_GPIO_Port, DI_1_Pin, MOTOR_GPIO_OFF)
 
-#define DI3_ON()     HAL_GPIO_WritePin(DI_3_GPIO_Port, DI_3_Pin, MOTOR_GPIO_ON)
-#define DI3_OFF()    HAL_GPIO_WritePin(DI_3_GPIO_Port, DI_3_Pin, MOTOR_GPIO_OFF)
+#define DI3_ON()   HAL_GPIO_WritePin(DI_3_GPIO_Port, DI_3_Pin, MOTOR_GPIO_ON)
+#define DI3_OFF()  HAL_GPIO_WritePin(DI_3_GPIO_Port, DI_3_Pin, MOTOR_GPIO_OFF)
 
 static uint16_t ToRpm(uint8_t percent)
 {
-    uint8_t p;
-
-    p = percent;
+    uint8_t p = percent;
 
     if (p < LIFT_MIN_PERCENT)
     {
@@ -94,24 +92,10 @@ static uint16_t ToRpm(uint8_t percent)
     return (uint16_t)(((uint32_t)LIFT_MAX_RPM * (uint32_t)p) / 100UL);
 }
 
-/*
- * mm 거리를 motor unit으로 변환한다.
- *
- * TCP에서 들어오는 위치값은 이제 motor unit이 아니라 mm로 본다.
- *
- * 공식:
- *   바퀴 1바퀴 거리 = 지름 × pi
- *   unit = mm × 모터 1바퀴 unit / 바퀴 1바퀴 거리
- *
- * 정수 연산만 사용하기 위해:
- *   WHEEL_DIA_MM_X10 = 지름(mm) × 10
- *   PI_X10000 = 3.1416 × 10000
- */
 int32_t Motor_mmToUnit(int32_t mm)
 {
     const int64_t PI_X10000 = 31416LL;
-
-    int64_t sign;
+    int64_t sign = 1LL;
     int64_t mm_abs;
     int64_t wheel_cir_x10;
     int64_t unit;
@@ -123,19 +107,9 @@ int32_t Motor_mmToUnit(int32_t mm)
     }
     else
     {
-        sign = 1LL;
         mm_abs = (int64_t)mm;
     }
 
-    /*
-     * wheel_cir_x10 단위:
-     *   0.1mm
-     *
-     * 예:
-     *   지름 50.0mm = WHEEL_DIA_MM_X10 500
-     *   원주 = 50.0 × 3.1416 = 157.08mm
-     *   wheel_cir_x10 = 약 1570
-     */
     wheel_cir_x10 = ((int64_t)WHEEL_DIA_MM_X10 * PI_X10000) / 10000LL;
 
     if (wheel_cir_x10 <= 0LL)
@@ -143,13 +117,6 @@ int32_t Motor_mmToUnit(int32_t mm)
         return 0L;
     }
 
-    /*
-     * mm_abs × 10:
-     *   mm를 0.1mm 단위로 변환.
-     *
-     * DRIVE_RATIO_NUM / DRIVE_RATIO_DEN:
-     *   모터와 바퀴가 1:1이 아닐 때 보정.
-     */
     unit =
         (mm_abs * 10LL *
          (int64_t)MOTOR_UNIT_PER_TURN *
@@ -160,30 +127,19 @@ int32_t Motor_mmToUnit(int32_t mm)
     return (int32_t)(unit * sign);
 }
 
-//현재는 완료 판단용이 아니라 timeout 기준값으로 사용한다.
 static uint32_t GuessMs(int32_t now, int32_t target, uint16_t rpm, uint16_t acc_ms)
 {
-    int32_t diff;
+    int32_t diff = target - now;
     uint32_t units;
     uint32_t turns;
-    uint32_t move_ms;
-    uint32_t wait_ms;
+    uint32_t ms;
 
     if (rpm == 0U)
     {
         return 60000UL;
     }
 
-    diff = target - now;
-
-    if (diff < 0L)
-    {
-        units = (uint32_t)(-diff);
-    }
-    else
-    {
-        units = (uint32_t)diff;
-    }
+    units = (diff < 0L) ? (uint32_t)(-diff) : (uint32_t)diff;
 
     if (units == 0UL)
     {
@@ -197,34 +153,23 @@ static uint32_t GuessMs(int32_t now, int32_t target, uint16_t rpm, uint16_t acc_
         turns++;
     }
 
-    move_ms = (turns * 60000UL) / (uint32_t)rpm;
-    wait_ms = move_ms + (uint32_t)acc_ms + 300UL;
+    ms = ((turns * 60000UL) / (uint32_t)rpm) + (uint32_t)acc_ms + 300UL;
 
-    if (wait_ms < 500UL)
+    if (ms < 500UL)
     {
-        wait_ms = 500UL;
+        ms = 500UL;
     }
 
-    if (wait_ms > 60000UL)
+    if (ms > 60000UL)
     {
-        wait_ms = 60000UL;
+        ms = 60000UL;
     }
 
-    return wait_ms;
+    return ms;
 }
 
-void Motor_InitIO(void)
+static void ClearState(void)
 {
-    /*
-     * DI1 = STM이 Servo Enable 제어
-     * DI2 = 광센서 입력으로 읽기만 함
-     * DI3 = STM이 Emergency Stop 제어
-     */
-    DI1_OFF();
-    DI3_OFF();
-
-    Bus_Rx();
-
     motor_state.setup_done = 0U;
     motor_state.home_done = 0U;
     motor_state.running = 0U;
@@ -256,132 +201,209 @@ void Motor_InitIO(void)
     estop_latch = 0U;
 }
 
-static void ServoOn(void)
+void Motor_InitIO(void)
 {
-    DI1_ON();
-    HAL_Delay(300U);
+    DI1_OFF();
+    DI3_OFF();
+    Bus_Rx();
+    ClearState();
+}
 
-    motor_state.enable_on = 1U;
-    motor_state.servo_on = 1U;
+static HAL_StatusTypeDef Write16(UART_HandleTypeDef *huart,
+                                 uint16_t reg,
+                                 uint16_t val,
+                                 const char *name)
+{
+    HAL_StatusTypeDef st;
+
+    st = Bus_Write16(huart, reg, val);
+    motor_state.last_hal = st;
+
+    if (st != HAL_OK)
+    {
+        printf("[MOTOR] %s fail reg=0x%04X val=%u st=%d ex=%u crc=%u uart=0x%08lX\r\n",
+               name,
+               reg,
+               val,
+               st,
+               motor_debug.exception_code,
+               motor_debug.crc_ok,
+               (unsigned long)motor_debug.uart_error);
+    }
+
+    HAL_Delay(10U);
+    return st;
+}
+
+static HAL_StatusTypeDef Write32(UART_HandleTypeDef *huart,
+                                 uint16_t reg,
+                                 int32_t val,
+                                 const char *name)
+{
+    HAL_StatusTypeDef st;
+
+    st = Bus_Write32(huart, reg, val);
+    motor_state.last_hal = st;
+
+    if (st != HAL_OK)
+    {
+        printf("[MOTOR] %s fail reg=0x%04X val=%ld st=%d ex=%u crc=%u uart=0x%08lX\r\n",
+               name,
+               reg,
+               (long)val,
+               st,
+               motor_debug.exception_code,
+               motor_debug.crc_ok,
+               (unsigned long)motor_debug.uart_error);
+    }
+
+    HAL_Delay(10U);
+    return st;
 }
 
 static void ServoOff(void)
 {
     DI1_OFF();
-
     motor_state.enable_on = 0U;
     motor_state.servo_on = 0U;
 }
 
-static HAL_StatusTypeDef StartOff(UART_HandleTypeDef *huart)
+static HAL_StatusTypeDef ServoOn(UART_HandleTypeDef *huart)
 {
     HAL_StatusTypeDef st;
 
-    st = Bus_Write16(huart, REG_START, 0U);
-    motor_state.last_hal = st;
+    DI1_ON();
+    HAL_Delay(300U);
 
-    return st;
+#if USE_COMM_SERVO_ON
+    if (huart != NULL)
+    {
+        st = Bus_Write16(huart, REG_DI1_LOGIC, 1U);
+
+        if (st != HAL_OK)
+        {
+            printf("[SERVO] comm on fail st=%d ex=%u crc=%u uart=0x%08lX\r\n",
+                   st,
+                   motor_debug.exception_code,
+                   motor_debug.crc_ok,
+                   (unsigned long)motor_debug.uart_error);
+        }
+
+        HAL_Delay(100U);
+    }
+#else
+    (void)huart;
+#endif
+
+    motor_state.enable_on = 1U;
+    motor_state.servo_on = 1U;
+
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef StartOff(UART_HandleTypeDef *huart)
+{
+    return Write16(huart, REG_START, 0U, "start_off");
 }
 
 static HAL_StatusTypeDef StartOn(UART_HandleTypeDef *huart)
 {
     HAL_StatusTypeDef st;
 
-    /*
-     * Multi-segment start 신호를 확실히 주기 위해
-     * 0 -> 1 edge를 만든다.
-     */
-    st = Bus_Write16(huart, REG_START, 0U);
+    st = Write16(huart, REG_START, 0U, "start_0");
 
     if (st != HAL_OK)
     {
-        motor_state.last_hal = st;
         return st;
     }
 
     HAL_Delay(20U);
 
-    st = Bus_Write16(huart, REG_START, 1U);
-    motor_state.last_hal = st;
+    return Write16(huart, REG_START, 1U, "start_1");
+}
 
-    return st;
+static HAL_StatusTypeDef StopCore(UART_HandleTypeDef *huart, uint8_t emergency)
+{
+    int32_t pos;
+
+    if (huart != NULL)
+    {
+        (void)StartOff(huart);
+
+        if (Motor_ReadPos(huart, &pos) != HAL_OK)
+        {
+            motor_state.cur_pos = motor_state.last_target;
+        }
+    }
+
+    motor_state.running = 0U;
+
+    if (emergency != 0U)
+    {
+        ServoOff();
+        DI3_ON();
+
+        motor_state.estop_on = 1U;
+        motor_state.error = 1U;
+        estop_latch = 1U;
+    }
+
+    motor_state.last_hal = HAL_OK;
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef WriteMove(UART_HandleTypeDef *huart,
+                                   int32_t target,
+                                   uint16_t rpm,
+                                   uint16_t acc_ms)
+{
+    HAL_StatusTypeDef st;
+
+    printf("[MOVE] target=%ld rpm=%u acc=%u\r\n",
+           (long)target,
+           rpm,
+           acc_ms);
+
+    st = StartOff(huart);
+    if (st != HAL_OK) return st;
+
+    HAL_Delay(50U);
+
+    st = Write16(huart, REG_MOVE_TYPE, VAL_MOVE_ABS, "move_type");
+    if (st != HAL_OK) return st;
+
+    st = Write32(huart, REG_TARGET_POS, target, "target");
+    if (st != HAL_OK) return st;
+
+    st = Write16(huart, REG_SPEED, rpm, "speed");
+    if (st != HAL_OK) return st;
+
+    st = Write16(huart, REG_ACC, acc_ms, "acc");
+    if (st != HAL_OK) return st;
+
+    st = Write16(huart, REG_WAIT, 0U, "wait");
+    if (st != HAL_OK) return st;
+
+    return HAL_OK;
 }
 
 HAL_StatusTypeDef Motor_Setup(UART_HandleTypeDef *huart)
 {
     HAL_StatusTypeDef st;
-    uint32_t i;
 
-    const RegPair_t list[] =
+    const RegPair_t setup_list[] =
     {
-        /*
-         * H02_00 = 1
-         * Position control mode
-         */
-        { REG_CONTROL_MODE, VAL_POS_MODE        },
-
-        /*
-         * H03_02 = 1
-         * DI1 = Servo enable
-         */
-        { REG_DI1_FUNC,     VAL_DI_SERVO        },
-
-        /*
-         * H03_03 = 0
-         * DI1 positive logic
-         */
-        { REG_DI1_LOGIC,    0U                  },
-
-        /*
-         * H03_04 = 28
-         * DI2 = multi-segment position run enable
-         *
-         * 이 설정이 빠지면 H03_05를 1로 써도
-         * 위치 운전 start로 안 먹을 수 있다.
-         */
-        { REG_DI2_FUNC,     VAL_DI2_POS_START   },
-
-        /*
-         * H03_05 = 0
-         * Start OFF
-         */
-        { REG_START,        0U                  },
-
-        /*
-         * H03_06 = 34
-         * DI3 = emergency stop
-         */
-        { REG_DI3_FUNC,     VAL_DI_ESTOP        },
-
-        /*
-         * H03_07 = 0
-         * DI3 positive logic
-         */
-        { REG_DI3_LOGIC,    0U                  },
-
-        /*
-         * H05_00 = 2
-         * Position command source = internal multi-segment command
-         */
-        { REG_POS_SOURCE,   VAL_POS_INTERNAL    },
-
-        /*
-         * H11_00 = 0
-         * Single cycle
-         */
-        { REG_RUN_MODE,     VAL_RUN_SINGLE      },
-
-        /*
-         * H11_01 = 1
-         * Use segment 1 only
-         */
-        { REG_END_SEG,      VAL_END_SEG1        },
-
-        /*
-         * H11_16 = 0
-         * Wait time 0
-         */
-        { REG_WAIT,         0U                  }
+        { REG_CONTROL_MODE, VAL_POS_MODE     },
+        { REG_DI1_FUNC,     VAL_DI_SERVO     },
+        { REG_DI1_LOGIC,    0U               },
+        { REG_DI2_FUNC,     VAL_DI2_START    },
+        { REG_START,        0U               },
+        { REG_DI3_FUNC,     VAL_DI_ESTOP     },
+        { REG_DI3_LOGIC,    0U               },
+        { REG_POS_SOURCE,   VAL_POS_INTERNAL },
+        { REG_RUN_MODE,     VAL_RUN_SINGLE   },
+        { REG_END_SEG,      VAL_END_SEG1     },
+        { REG_WAIT,         0U               }
     };
 
     if (huart == NULL)
@@ -393,20 +415,19 @@ HAL_StatusTypeDef Motor_Setup(UART_HandleTypeDef *huart)
     Bus_Rx();
     HAL_Delay(50U);
 
-    for (i = 0U; i < (sizeof(list) / sizeof(list[0])); i++)
+    for (uint32_t i = 0U; i < (sizeof(setup_list) / sizeof(setup_list[0])); i++)
     {
-        st = Bus_Write16(huart, list[i].reg, list[i].val);
+        st = Write16(huart, setup_list[i].reg, setup_list[i].val, "setup");
 
         if (st != HAL_OK)
         {
             motor_state.setup_done = 0U;
             motor_state.error = 1U;
-            motor_state.last_hal = st;
             return st;
         }
-
-        HAL_Delay(10U);
     }
+
+    (void)ServoOn(huart);
 
     motor_state.setup_done = 1U;
     motor_state.error = 0U;
@@ -415,85 +436,26 @@ HAL_StatusTypeDef Motor_Setup(UART_HandleTypeDef *huart)
     return HAL_OK;
 }
 
-static HAL_StatusTypeDef WriteMove(
-    UART_HandleTypeDef *huart,
-    int32_t target,
-    uint16_t rpm,
-    uint16_t acc_ms
-)
-{
-    HAL_StatusTypeDef st;
-
-    st = StartOff(huart);
-
-    if (st != HAL_OK)
-    {
-        return st;
-    }
-
-    HAL_Delay(50U);
-
-    st = Bus_Write16(huart, REG_MOVE_TYPE, VAL_MOVE_ABS);
-
-    if (st != HAL_OK)
-    {
-        return st;
-    }
-
-    st = Bus_Write32(huart, REG_TARGET_POS, target);
-
-    if (st != HAL_OK)
-    {
-        return st;
-    }
-
-    st = Bus_Write16(huart, REG_SPEED, rpm);
-
-    if (st != HAL_OK)
-    {
-        return st;
-    }
-
-    st = Bus_Write16(huart, REG_ACC, acc_ms);
-
-    if (st != HAL_OK)
-    {
-        return st;
-    }
-
-    return Bus_Write16(huart, REG_WAIT, 0U);
-}
-
-HAL_StatusTypeDef Motor_Start(
-    UART_HandleTypeDef *huart,
-    int32_t pos,
-    uint8_t speed,
-    uint16_t acc_ms
-)
+HAL_StatusTypeDef Motor_Start(UART_HandleTypeDef *huart,
+                              int32_t pos,
+                              uint8_t speed,
+                              uint16_t acc_ms)
 {
     HAL_StatusTypeDef st;
     int32_t target;
     uint16_t rpm;
 
-    if (huart == NULL)
-    {
-        motor_state.last_hal = HAL_ERROR;
-        return HAL_ERROR;
-    }
-
-    if (estop_latch != 0U)
+    if (huart == NULL || estop_latch != 0U || motor_state.home_done == 0U)
     {
         motor_state.running = 0U;
         motor_state.error = 1U;
         motor_state.last_hal = HAL_ERROR;
-        return HAL_ERROR;
-    }
 
-    if (motor_state.home_done == 0U)
-    {
-        motor_state.running = 0U;
-        motor_state.error = 1U;
-        motor_state.last_hal = HAL_ERROR;
+        if (motor_state.home_done == 0U)
+        {
+            printf("[MOTOR] home not set\r\n");
+        }
+
         return HAL_ERROR;
     }
 
@@ -508,8 +470,6 @@ HAL_StatusTypeDef Motor_Start(
             motor_state.last_hal = st;
             return st;
         }
-
-        HAL_Delay(300U);
     }
 
     target = motor_state.home_offset + pos;
@@ -522,8 +482,15 @@ HAL_StatusTypeDef Motor_Start(
     motor_state.move_ms = GuessMs(motor_state.cur_pos, target, rpm, acc_ms);
     motor_state.running = 1U;
 
+    (void)ServoOn(huart);
+
     st = WriteMove(huart, target, rpm, acc_ms);
 
+    if (st == HAL_OK)
+    {
+        st = StartOn(huart);
+    }
+
     if (st != HAL_OK)
     {
         motor_state.running = 0U;
@@ -532,26 +499,6 @@ HAL_StatusTypeDef Motor_Start(
         return st;
     }
 
-    ServoOn();
-
-    st = StartOn(huart);
-
-    if (st != HAL_OK)
-    {
-        ServoOff();
-
-        motor_state.running = 0U;
-        motor_state.error = 1U;
-        motor_state.last_hal = st;
-        return st;
-    }
-
-    /*
-     * 여기까지 왔다는 것은:
-     * 1. 이동 파라미터 쓰기 성공
-     * 2. ServoOn 실행
-     * 3. StartOn 쓰기 성공
-     */
     printf("[MOTOR_START] target=%ld rpm=%u acc=%u start_ok\r\n",
            (long)target,
            rpm,
@@ -562,21 +509,36 @@ HAL_StatusTypeDef Motor_Start(
     motor_state.last_hal = HAL_OK;
 
     return HAL_OK;
-	}
+}
+
+/*
+ * 사수가 말한 방식:
+ * DI2를 Home_Switch로 잠깐 바꾸고,
+ * H05_30=4로 모터 내부 원점복귀를 시작한다.
+ *
+ * 테스트 후 일반 move 전에 motor setup을 다시 실행하면
+ * DI2가 다시 PosInSen으로 돌아간다.
+ */
 HAL_StatusTypeDef Motor_StartHome(UART_HandleTypeDef *huart)
 {
     HAL_StatusTypeDef st;
-    int32_t now;
-    int32_t target;
-    uint16_t rpm;
 
-    if (huart == NULL)
-    {
-        motor_state.last_hal = HAL_ERROR;
-        return HAL_ERROR;
-    }
+    const uint16_t REG_HOME_TRIGGER    = 0x051E;  /* H05_30 */
+    const uint16_t REG_HOME_MODE       = 0x051F;  /* H05_31 */
+    const uint16_t REG_HOME_FAST_SPEED = 0x0520;  /* H05_32 */
+    const uint16_t REG_HOME_SLOW_SPEED = 0x0521;  /* H05_33 */
+    const uint16_t REG_HOME_ACC        = 0x0522;  /* H05_34 */
+    const uint16_t REG_HOME_TIMEOUT    = 0x0523;  /* H05_35 */
 
-    if (estop_latch != 0U)
+    const uint16_t VAL_HOME_SWITCH     = 31U;
+    const uint16_t VAL_HOME_START      = 4U;
+
+    /*
+     * 방향이 반대면 1U를 0U로 바꿔서 테스트.
+     */
+    const uint16_t HOME_MODE_VALUE     = 1U;
+
+    if (huart == NULL || estop_latch != 0U)
     {
         motor_state.running = 0U;
         motor_state.error = 1U;
@@ -595,54 +557,67 @@ HAL_StatusTypeDef Motor_StartHome(UART_HandleTypeDef *huart)
             motor_state.last_hal = st;
             return st;
         }
-
-        HAL_Delay(300U);
     }
 
     /*
-     * 현재 모터 실제 위치를 읽고,
-     * 그 위치에서 MI 방향으로 길게 움직이면서 센서를 찾는다.
+     * DI2를 원점센서 입력으로 변경.
+     * 일반 move 전에 motor setup을 다시 하면 DI2가 PosInSen으로 복구된다.
      */
-    if (Motor_ReadPos(huart, &now) != HAL_OK)
+    st = Bus_Write16(huart, REG_DI2_FUNC, VAL_HOME_SWITCH);
+    if (st != HAL_OK) return st;
+    HAL_Delay(20U);
+
+    st = Bus_Write16(huart, REG_HOME_MODE, HOME_MODE_VALUE);
+    if (st != HAL_OK) return st;
+    HAL_Delay(20U);
+
+    st = Bus_Write16(huart, REG_HOME_FAST_SPEED, 100U);
+    if (st != HAL_OK) return st;
+    HAL_Delay(20U);
+
+    st = Bus_Write16(huart, REG_HOME_SLOW_SPEED, 20U);
+    if (st != HAL_OK) return st;
+    HAL_Delay(20U);
+
+    st = Bus_Write16(huart, REG_HOME_ACC, 200U);
+    if (st != HAL_OK) return st;
+    HAL_Delay(20U);
+
+    st = Bus_Write16(huart, REG_HOME_TIMEOUT, 60000U);
+    if (st != HAL_OK) return st;
+    HAL_Delay(20U);
+
+    (void)ServoOn(huart);
+
+    /*
+     * H05_30 = 4
+     * 통신으로 모터 내부 원점복귀 시작.
+     */
+    st = Bus_Write16(huart, REG_HOME_TRIGGER, VAL_HOME_START);
+
+    if (st != HAL_OK)
     {
-        now = motor_state.cur_pos;
+        motor_state.running = 0U;
+        motor_state.error = 1U;
+        motor_state.last_hal = st;
+
+        printf("[HOME] trigger fail st=%d ex=%u crc=%u uart=0x%08lX\r\n",
+               st,
+               motor_debug.exception_code,
+               motor_debug.crc_ok,
+               (unsigned long)motor_debug.uart_error);
+
+        return st;
     }
 
-    target = now + HOME_FIND_POS;
-    rpm = ToRpm(HOME_FIND_SPEED);
-
-    motor_state.last_target = target;
-    motor_state.last_speed = HOME_FIND_SPEED;
-    motor_state.last_rpm = rpm;
-    motor_state.last_acc_ms = HOME_FIND_ACC_MS;
-    motor_state.move_ms = GuessMs(now, target, rpm, HOME_FIND_ACC_MS);
     motor_state.running = 1U;
     motor_state.error = 0U;
-
-    st = WriteMove(huart, target, rpm, HOME_FIND_ACC_MS);
-
-    if (st != HAL_OK)
-    {
-        motor_state.running = 0U;
-        motor_state.error = 1U;
-        motor_state.last_hal = st;
-        return st;
-    }
-
-    ServoOn();
-
-    st = StartOn(huart);
-
-    if (st != HAL_OK)
-    {
-        ServoOff();
-        motor_state.running = 0U;
-        motor_state.error = 1U;
-        motor_state.last_hal = st;
-        return st;
-    }
-
+    motor_state.move_ms = 65000U;
+    motor_state.setup_done = 0U;
     motor_state.last_hal = HAL_OK;
+
+    printf("[HOME] internal home start mode=%u\r\n", HOME_MODE_VALUE);
+
     return HAL_OK;
 }
 
@@ -650,7 +625,7 @@ HAL_StatusTypeDef Motor_ReadPos(UART_HandleTypeDef *huart, int32_t *pos)
 {
     HAL_StatusTypeDef st;
 
-    if ((huart == NULL) || (pos == NULL))
+    if (huart == NULL || pos == NULL)
     {
         return HAL_ERROR;
     }
@@ -664,7 +639,6 @@ HAL_StatusTypeDef Motor_ReadPos(UART_HandleTypeDef *huart, int32_t *pos)
     }
 
     motor_state.last_hal = st;
-
     return st;
 }
 
@@ -672,7 +646,7 @@ HAL_StatusTypeDef Motor_ReadDiff(UART_HandleTypeDef *huart, int32_t *diff)
 {
     HAL_StatusTypeDef st;
 
-    if ((huart == NULL) || (diff == NULL))
+    if (huart == NULL || diff == NULL)
     {
         return HAL_ERROR;
     }
@@ -689,14 +663,6 @@ uint8_t Motor_CheckDone(UART_HandleTypeDef *huart)
     int32_t pos;
     int32_t gap;
 
-    /*
-     * 현재 네 모터에서는 H0B_15 위치 편차값(diff)이 0으로 나오는 경우가 있다.
-     * diff=0만 보고 완료 처리하면 모터가 움직이기 전에
-     * Motor_Done() -> StartOff()가 실행된다.
-     *
-     * 따라서 diff는 디버그용으로만 읽고,
-     * 실제 완료 판단은 현재 위치와 목표 위치의 차이로만 한다.
-     */
     if (Motor_ReadDiff(huart, &diff) == HAL_OK)
     {
         (void)diff;
@@ -714,36 +680,13 @@ uint8_t Motor_CheckDone(UART_HandleTypeDef *huart)
         gap = -gap;
     }
 
-    if (gap <= MOTOR_DONE_DIFF_LIMIT)
-    {
-        return 1U;
-    }
-
-    return 0U;
+    return (gap <= DONE_GAP_LIMIT) ? 1U : 0U;
 }
 
 HAL_StatusTypeDef Motor_Done(UART_HandleTypeDef *huart)
 {
-    HAL_StatusTypeDef st;
-    int32_t pos;
+    (void)StopCore(huart, 0U);
 
-    st = StartOff(huart);
-
-    if (st != HAL_OK)
-    {
-        motor_state.running = 0U;
-        motor_state.error = 1U;
-        motor_state.last_hal = st;
-        return st;
-    }
-
-    if (Motor_ReadPos(huart, &pos) != HAL_OK)
-    {
-        motor_state.cur_pos = motor_state.last_target;
-    }
-
-
-    motor_state.running = 0U;
     motor_state.error = 0U;
     motor_state.seq++;
     motor_state.last_hal = HAL_OK;
@@ -751,9 +694,37 @@ HAL_StatusTypeDef Motor_Done(UART_HandleTypeDef *huart)
     return HAL_OK;
 }
 
+HAL_StatusTypeDef Motor_Stop(UART_HandleTypeDef *huart)
+{
+    return StopCore(huart, 0U);
+}
+
+HAL_StatusTypeDef Motor_EStop(UART_HandleTypeDef *huart)
+{
+    return StopCore(huart, 1U);
+}
+
+HAL_StatusTypeDef Motor_Release(UART_HandleTypeDef *huart)
+{
+    (void)huart;
+
+    ServoOff();
+    DI3_OFF();
+
+    HAL_Delay(500U);
+
+    estop_latch = 0U;
+    motor_state.estop_on = 0U;
+    motor_state.running = 0U;
+    motor_state.error = 0U;
+    motor_state.setup_done = 0U;
+    motor_state.last_hal = HAL_OK;
+
+    return HAL_OK;
+}
+
 HAL_StatusTypeDef Motor_SaveHomeHere(UART_HandleTypeDef *huart)
 {
-    HAL_StatusTypeDef st;
     int32_t pos;
 
     if (huart == NULL)
@@ -762,124 +733,34 @@ HAL_StatusTypeDef Motor_SaveHomeHere(UART_HandleTypeDef *huart)
         return HAL_ERROR;
     }
 
-    /*
-     * 센서 감지 순간 즉시 Start OFF.
-     */
-    st = StartOff(huart);
-
-    if (st != HAL_OK)
-    {
-        motor_state.running = 0U;
-        motor_state.error = 1U;
-        motor_state.last_hal = st;
-        return st;
-    }
-
-    /*
-     * 모터가 완전히 정지할 시간을 조금 준다.
-     * 너무 길면 오차가 커질 수 있고, 너무 짧으면 위치 읽기가 흔들릴 수 있다.
-     */
+    (void)StartOff(huart);
     HAL_Delay(100U);
 
-    /*
-     * 멈춘 위치를 읽고, 그 위치를 새로운 원점으로 저장한다.
-     */
     if (Motor_ReadPos(huart, &pos) != HAL_OK)
     {
         pos = motor_state.cur_pos;
     }
 
-    motor_state.cur_pos = pos;
-    motor_state.home_offset = pos;
-    motor_state.home_done = 1U;
-
-    motor_state.running = 0U;
-    motor_state.error = 0U;
-    motor_state.seq++;
-    motor_state.last_hal = HAL_OK;
-
-    return HAL_OK;
+    return Motor_SetHomeOffset(pos);
 }
-
-
-HAL_StatusTypeDef Motor_Stop(UART_HandleTypeDef *huart)
-{
-    HAL_StatusTypeDef st;
-    int32_t pos;
-
-    if (huart != NULL)
-    {
-        st = StartOff(huart);
-
-        if (Motor_ReadPos(huart, &pos) != HAL_OK)
-        {
-            motor_state.cur_pos = motor_state.last_target;
-        }
-    }
-    else
-    {
-        st = HAL_OK;
-    }
-
-    motor_state.running = 0U;
-    motor_state.last_hal = st;
-
-    return st;
-}
-
-HAL_StatusTypeDef Motor_EStop(UART_HandleTypeDef *huart)
-{
-    int32_t pos;
-
-    if (huart != NULL)
-    {
-        (void)StartOff(huart);
-
-        if (Motor_ReadPos(huart, &pos) != HAL_OK)
-        {
-            motor_state.cur_pos = motor_state.last_target;
-        }
-    }
-
-    ServoOff();
-
-    DI3_ON();
-    motor_state.estop_on = 1U;
-
-    motor_state.running = 0U;
-    motor_state.error = 1U;
-    estop_latch = 1U;
-    motor_state.last_hal = HAL_OK;
-
-    return HAL_OK;
-}
-
-HAL_StatusTypeDef Motor_Release(UART_HandleTypeDef *huart)
-{
-    (void)huart;
-
-    ServoOff();
-
-    DI3_OFF();
-    motor_state.estop_on = 0U;
-    HAL_Delay(500U);
-
-    estop_latch = 0U;
-    motor_state.running = 0U;
-    motor_state.error = 0U;
-
-    motor_state.setup_done = 0U;
-    motor_state.last_hal = HAL_OK;
-
-    return HAL_OK;
-}
-
 
 HAL_StatusTypeDef Motor_SetHome(void)
 {
     motor_state.home_offset = motor_state.cur_pos;
     motor_state.home_done = 1U;
     motor_state.error = 0U;
+    motor_state.last_hal = HAL_OK;
+
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef Motor_SetHomeOffset(int32_t home_offset)
+{
+    motor_state.home_offset = home_offset;
+    motor_state.home_done = 1U;
+    motor_state.running = 0U;
+    motor_state.error = 0U;
+    motor_state.seq++;
     motor_state.last_hal = HAL_OK;
 
     return HAL_OK;
@@ -923,35 +804,18 @@ osStatus_t Motor_SendCmd(const MotorCommand_t *cmd)
     return osMessageQueuePut(MotorQueueHandle, cmd, 0U, 0U);
 }
 
-osStatus_t Motor_SendMove(
-    int32_t pos,
-    uint32_t speed,
-    uint32_t acc_ms,
-    uint32_t start_ms,
-    uint32_t wait_ms
-)
+osStatus_t Motor_SendMove(int32_t pos,
+                          uint32_t speed,
+                          uint32_t acc_ms,
+                          uint32_t start_ms,
+                          uint32_t wait_ms)
 {
     MotorCommand_t cmd;
 
-    if (MotorQueueHandle == NULL)
-    {
-        return osErrorResource;
-    }
-
-    if (Motor_IsBusy() != 0U)
-    {
-        return osErrorResource;
-    }
-
-    if (osMessageQueueGetCount(MotorQueueHandle) > 0U)
-    {
-        return osErrorResource;
-    }
-
-    if (Motor_IsEStop() != 0U)
-    {
-        return osErrorResource;
-    }
+    if (MotorQueueHandle == NULL) return osErrorResource;
+    if (Motor_IsBusy() != 0U) return osErrorResource;
+    if (osMessageQueueGetCount(MotorQueueHandle) > 0U) return osErrorResource;
+    if (Motor_IsEStop() != 0U) return osErrorResource;
 
     cmd.id = MOTOR_CMD_MOVE;
     cmd.pos = pos;
@@ -1009,34 +873,15 @@ osStatus_t Motor_SendHome(void)
 {
     MotorCommand_t cmd;
 
-    if (MotorQueueHandle == NULL)
-    {
-        return osErrorResource;
-    }
+    if (MotorQueueHandle == NULL) return osErrorResource;
+    if (Motor_IsBusy() != 0U) return osErrorResource;
+    if (osMessageQueueGetCount(MotorQueueHandle) > 0U) return osErrorResource;
+    if (Motor_IsEStop() != 0U) return osErrorResource;
 
-    if (Motor_IsBusy() != 0U)
-    {
-        return osErrorResource;
-    }
-
-    if (osMessageQueueGetCount(MotorQueueHandle) > 0U)
-    {
-        return osErrorResource;
-    }
-
-    if (Motor_IsEStop() != 0U)
-    {
-        return osErrorResource;
-    }
-
-    /*
-     * 01H는 일반 MOVE가 아니다.
-     * 센서를 찾는 원점 탐색 명령이다.
-     */
     cmd.id = MOTOR_CMD_HOME;
     cmd.pos = 0L;
-    cmd.speed = HOME_FIND_SPEED;
-    cmd.acc_ms = HOME_FIND_ACC_MS;
+    cmd.speed = HOME_FAST_RPM;
+    cmd.acc_ms = HOME_ACC_MS;
     cmd.start_ms = 0U;
     cmd.wait_ms = 0U;
 

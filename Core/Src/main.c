@@ -30,8 +30,7 @@
 #include "wiz6100_port.h"
 #include "motor.h"
 
-#include "mac_eeprom.h"
-#include "fram.h"
+#include "net.h"
 #include "cli.h"
 #include "rs485.h"
 

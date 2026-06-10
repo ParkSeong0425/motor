@@ -153,6 +153,7 @@ uint8_t Motor_CheckDone(UART_HandleTypeDef *huart);
 
 HAL_StatusTypeDef Motor_StartHome(UART_HandleTypeDef *huart);
 HAL_StatusTypeDef Motor_SaveHomeHere(UART_HandleTypeDef *huart);
+HAL_StatusTypeDef Motor_SetHomeOffset(int32_t home_offset);
 
 uint8_t Motor_HomeOk(void);
 uint8_t Motor_IsEStop(void);

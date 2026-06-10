@@ -415,10 +415,137 @@ void StartMotorTask(void *argument)
         break;
 
       case MOTOR_CMD_HOME:
-        /*
-         * 원점 센서 기반 home은 아직 안전 로직이 완성되지 않았다.
-         * 지금은 motor sethome으로 현재 위치를 임시 원점으로 잡고 테스트한다.
-         */
+      {
+        int32_t first_pos = 0L;
+        int32_t last_pos = 0L;
+        int32_t now_pos = 0L;
+        int32_t diff_pos = 0L;
+        uint32_t stable_ms = 0U;
+        uint8_t moved = 0U;
+
+        printf("[HOME_TASK] start\r\n");
+
+        st = Motor_StartHome(&huart5);
+
+        if (st != HAL_OK)
+        {
+          motor_state.running = 0U;
+          motor_state.error = 1U;
+
+          printf("[HOME_TASK] start failed st=%d last_hal=%d ex=%u crc=%u uart=0x%08lX\r\n",
+                 st,
+                 motor_state.last_hal,
+                 motor_debug.exception_code,
+                 motor_debug.crc_ok,
+                 (unsigned long)motor_debug.uart_error);
+          break;
+        }
+
+        elapsed = 0U;
+        timeout_ms = motor_state.move_ms;
+
+        if (timeout_ms < 5000U)
+        {
+          timeout_ms = 5000U;
+        }
+
+        if (timeout_ms > 70000U)
+        {
+          timeout_ms = 70000U;
+        }
+
+        if (Motor_ReadPos(&huart5, &first_pos) != HAL_OK)
+        {
+          first_pos = motor_state.cur_pos;
+        }
+
+        last_pos = first_pos;
+
+        while (elapsed < timeout_ms)
+        {
+          if (osMessageQueueGet(MotorQueueHandle, &stop_cmd, NULL, 0U) == osOK)
+          {
+            if (stop_cmd.id == MOTOR_CMD_STOP)
+            {
+              (void)Motor_Stop(&huart5);
+              printf("[HOME_TASK] stopped\r\n");
+              break;
+            }
+
+            if (stop_cmd.id == MOTOR_CMD_ESTOP)
+            {
+              (void)Motor_EStop(&huart5);
+              printf("[HOME_TASK] estop\r\n");
+              break;
+            }
+
+            if (stop_cmd.id == MOTOR_CMD_RELEASE)
+            {
+              (void)Motor_Release(&huart5);
+              printf("[HOME_TASK] release\r\n");
+              break;
+            }
+          }
+
+          if (Motor_ReadPos(&huart5, &now_pos) == HAL_OK)
+          {
+            diff_pos = now_pos - first_pos;
+
+            if (diff_pos < 0L)
+            {
+              diff_pos = -diff_pos;
+            }
+
+            if (diff_pos > 50L)
+            {
+              moved = 1U;
+            }
+
+            diff_pos = now_pos - last_pos;
+
+            if (diff_pos < 0L)
+            {
+              diff_pos = -diff_pos;
+            }
+
+            if (diff_pos <= 5L)
+            {
+              stable_ms += 100U;
+            }
+            else
+            {
+              stable_ms = 0U;
+              last_pos = now_pos;
+            }
+
+            /*
+             * 모터가 실제로 움직인 뒤,
+             * 위치가 1초 이상 거의 안 변하면
+             * 센서 또는 드라이버 내부 정지로 보고 home 저장.
+             */
+            if (moved != 0U && stable_ms >= 1000U)
+            {
+              (void)Motor_SaveHomeHere(&huart5);
+
+              printf("[HOME_TASK] done pos=%ld offset=%ld\r\n",
+                     (long)motor_state.cur_pos,
+                     (long)motor_state.home_offset);
+              break;
+            }
+          }
+
+          osDelay(100);
+          elapsed += 100U;
+        }
+
+        if (elapsed >= timeout_ms)
+        {
+          (void)Motor_Stop(&huart5);
+          motor_state.error = 1U;
+
+          printf("[HOME_TASK] timeout\r\n");
+        }
+
         break;
 
       default:
