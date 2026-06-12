@@ -35,7 +35,7 @@ HAL_StatusTypeDef MacEeprom_ReadMac(I2C_HandleTypeDef *hi2c,
 uint8_t MacEeprom_IsMacPlausible(const uint8_t mac[MAC_EEPROM_EUI48_LEN]);
 
 
-
+void Net_TaskRun(void *argument);
 
 
 #define FRAM_MB85RS64_SIZE_BYTES      8192U

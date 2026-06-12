@@ -1,12 +1,28 @@
-/*
- * net.c
- *
- *  Created on: Jun 10, 2026
- *      Author: HWNOT
- */
-
-
 #include "net.h"
+#include "cmsis_os.h"
+#include "i2c.h"
+#include "spi.h"
+#include "gpio.h"
+
+#include "wizchip_conf.h"
+#include "wiz6100_port.h"
+#include "tcp_cmd_server.h"
+
+#include <stdio.h>
+
+#define TCP_SOCKET   0
+#define TCP_PORT     5000
+
+static uint8_t tcp_buf[2048];
+
+static wiz_NetInfo netinfo = {
+    .mac = {0, 0, 0, 0, 0, 0},
+    .ip = {172, 20, 0, 192},
+    .sn = {255, 255, 0, 0},
+    .gw = {0, 0, 0, 0},
+    .dns = {0, 0, 0, 0},
+    .ipmode = NETINFO_STATIC_V4
+};
 
 HAL_StatusTypeDef MacEeprom_IsReady(I2C_HandleTypeDef *hi2c)
 {
@@ -22,23 +38,23 @@ HAL_StatusTypeDef MacEeprom_IsReady(I2C_HandleTypeDef *hi2c)
 }
 
 HAL_StatusTypeDef MacEeprom_Read(I2C_HandleTypeDef *hi2c,
-                                 uint8_t mem_addr,
+                                 uint8_t addr,
                                  uint8_t *data,
                                  uint16_t len)
 {
-    if (hi2c == NULL || data == NULL || len == 0U)
+    if (hi2c == NULL || data == NULL || len == 0)
     {
         return HAL_ERROR;
     }
 
-    if (((uint16_t)mem_addr + len) > MAC_EEPROM_SIZE_BYTES)
+    if (((uint16_t)addr + len) > MAC_EEPROM_SIZE_BYTES)
     {
         return HAL_ERROR;
     }
 
     return HAL_I2C_Mem_Read(hi2c,
                             MAC_EEPROM_I2C_ADDR_HAL,
-                            mem_addr,
+                            addr,
                             I2C_MEMADD_SIZE_8BIT,
                             data,
                             len,
@@ -46,10 +62,10 @@ HAL_StatusTypeDef MacEeprom_Read(I2C_HandleTypeDef *hi2c,
 }
 
 HAL_StatusTypeDef MacEeprom_ReadByte(I2C_HandleTypeDef *hi2c,
-                                     uint8_t mem_addr,
+                                     uint8_t addr,
                                      uint8_t *value)
 {
-    return MacEeprom_Read(hi2c, mem_addr, value, 1U);
+    return MacEeprom_Read(hi2c, addr, value, 1);
 }
 
 HAL_StatusTypeDef MacEeprom_ReadMac(I2C_HandleTypeDef *hi2c,
@@ -63,50 +79,40 @@ HAL_StatusTypeDef MacEeprom_ReadMac(I2C_HandleTypeDef *hi2c,
 
 uint8_t MacEeprom_IsMacPlausible(const uint8_t mac[MAC_EEPROM_EUI48_LEN])
 {
-    uint8_t all_00 = 1U;
-    uint8_t all_ff = 1U;
+    uint8_t all_00 = 1;
+    uint8_t all_ff = 1;
 
     if (mac == NULL)
     {
-        return 0U;
+        return 0;
     }
 
     for (uint8_t i = 0; i < MAC_EEPROM_EUI48_LEN; i++)
     {
-        if (mac[i] != 0x00U)
+        if (mac[i] != 0x00)
         {
-            all_00 = 0U;
+            all_00 = 0;
         }
 
-        if (mac[i] != 0xFFU)
+        if (mac[i] != 0xFF)
         {
-            all_ff = 0U;
+            all_ff = 0;
         }
     }
 
-    if (all_00 || all_ff)
+    if (all_00 != 0 || all_ff != 0)
     {
-        return 0U;
+        return 0;
     }
 
-    return 1U;
+    return 1;
 }
 
-/*
- * MB85RS64PNF SPI FRAM driver for STM32 HAL.
- *
- * WP and HOLD pins must be HIGH when not used.
- * SPI mode should be mode 0 or mode 3.
- * Start with SPI mode 0 and low speed during bring-up.
- */
-
-
-#define FRAM_CMD_WREN      0x06U
-#define FRAM_CMD_WRDI      0x04U
-#define FRAM_CMD_RDSR      0x05U
-#define FRAM_CMD_WRSR      0x01U
-#define FRAM_CMD_READ      0x03U
-#define FRAM_CMD_WRITE     0x02U
+#define FRAM_CMD_WREN   0x06
+#define FRAM_CMD_WRDI   0x04
+#define FRAM_CMD_RDSR   0x05
+#define FRAM_CMD_READ   0x03
+#define FRAM_CMD_WRITE  0x02
 
 static void Fram_CsLow(void)
 {
@@ -124,9 +130,9 @@ HAL_StatusTypeDef Fram_InitPins(void)
     return HAL_OK;
 }
 
-static HAL_StatusTypeDef Fram_SendCommand(SPI_HandleTypeDef *hspi, uint8_t cmd)
+static HAL_StatusTypeDef Fram_Cmd(SPI_HandleTypeDef *hspi, uint8_t cmd)
 {
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef result;
 
     if (hspi == NULL)
     {
@@ -134,27 +140,27 @@ static HAL_StatusTypeDef Fram_SendCommand(SPI_HandleTypeDef *hspi, uint8_t cmd)
     }
 
     Fram_CsLow();
-    st = HAL_SPI_Transmit(hspi, &cmd, 1, 100);
+    result = HAL_SPI_Transmit(hspi, &cmd, 1, 100);
     Fram_CsHigh();
 
-    return st;
+    return result;
 }
 
 HAL_StatusTypeDef Fram_WriteEnable(SPI_HandleTypeDef *hspi)
 {
-    return Fram_SendCommand(hspi, FRAM_CMD_WREN);
+    return Fram_Cmd(hspi, FRAM_CMD_WREN);
 }
 
 HAL_StatusTypeDef Fram_WriteDisable(SPI_HandleTypeDef *hspi)
 {
-    return Fram_SendCommand(hspi, FRAM_CMD_WRDI);
+    return Fram_Cmd(hspi, FRAM_CMD_WRDI);
 }
 
 HAL_StatusTypeDef Fram_ReadStatus(SPI_HandleTypeDef *hspi, uint8_t *status)
 {
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef result;
     uint8_t cmd = FRAM_CMD_RDSR;
-    uint8_t rx = 0x00U;
+    uint8_t rx = 0;
 
     if (hspi == NULL || status == NULL)
     {
@@ -163,67 +169,65 @@ HAL_StatusTypeDef Fram_ReadStatus(SPI_HandleTypeDef *hspi, uint8_t *status)
 
     Fram_CsLow();
 
-    st = HAL_SPI_Transmit(hspi, &cmd, 1, 100);
-    if (st == HAL_OK)
+    result = HAL_SPI_Transmit(hspi, &cmd, 1, 100);
+
+    if (result == HAL_OK)
     {
-        st = HAL_SPI_Receive(hspi, &rx, 1, 100);
+        result = HAL_SPI_Receive(hspi, &rx, 1, 100);
     }
 
     Fram_CsHigh();
 
-    if (st == HAL_OK)
+    if (result == HAL_OK)
     {
         *status = rx;
     }
 
-    return st;
+    return result;
 }
 
 HAL_StatusTypeDef Fram_CheckWriteEnableLatch(SPI_HandleTypeDef *hspi,
-                                             uint8_t *status_before,
-                                             uint8_t *status_after_wren,
-                                             uint8_t *status_after_wrdi)
+                                             uint8_t *before,
+                                             uint8_t *after_wren,
+                                             uint8_t *after_wrdi)
 {
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef result;
 
-    if (hspi == NULL || status_before == NULL ||
-        status_after_wren == NULL || status_after_wrdi == NULL)
+    if (hspi == NULL || before == NULL ||
+        after_wren == NULL || after_wrdi == NULL)
     {
         return HAL_ERROR;
     }
 
-    st = Fram_ReadStatus(hspi, status_before);
-    if (st != HAL_OK)
+    result = Fram_ReadStatus(hspi, before);
+
+    if (result == HAL_OK)
     {
-        return st;
+        result = Fram_WriteEnable(hspi);
     }
 
-    st = Fram_WriteEnable(hspi);
-    if (st != HAL_OK)
+    if (result == HAL_OK)
     {
-        return st;
+        result = Fram_ReadStatus(hspi, after_wren);
     }
 
-    st = Fram_ReadStatus(hspi, status_after_wren);
-    if (st != HAL_OK)
+    if (result == HAL_OK)
     {
-        return st;
+        result = Fram_WriteDisable(hspi);
     }
 
-    st = Fram_WriteDisable(hspi);
-    if (st != HAL_OK)
+    if (result == HAL_OK)
     {
-        return st;
+        result = Fram_ReadStatus(hspi, after_wrdi);
     }
 
-    st = Fram_ReadStatus(hspi, status_after_wrdi);
-    if (st != HAL_OK)
+    if (result != HAL_OK)
     {
-        return st;
+        return result;
     }
 
-    if (((*status_after_wren & FRAM_STATUS_WEL) == 0U) ||
-        ((*status_after_wrdi & FRAM_STATUS_WEL) != 0U))
+    if (((*after_wren & FRAM_STATUS_WEL) == 0) ||
+        ((*after_wrdi & FRAM_STATUS_WEL) != 0))
     {
         return HAL_ERROR;
     }
@@ -236,10 +240,10 @@ HAL_StatusTypeDef Fram_Read(SPI_HandleTypeDef *hspi,
                             uint8_t *data,
                             uint16_t len)
 {
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef result;
     uint8_t cmd[3];
 
-    if (hspi == NULL || data == NULL || len == 0U)
+    if (hspi == NULL || data == NULL || len == 0)
     {
         return HAL_ERROR;
     }
@@ -251,19 +255,20 @@ HAL_StatusTypeDef Fram_Read(SPI_HandleTypeDef *hspi,
 
     cmd[0] = FRAM_CMD_READ;
     cmd[1] = (uint8_t)(addr >> 8);
-    cmd[2] = (uint8_t)(addr & 0xFFU);
+    cmd[2] = (uint8_t)addr;
 
     Fram_CsLow();
 
-    st = HAL_SPI_Transmit(hspi, cmd, sizeof(cmd), 100);
-    if (st == HAL_OK)
+    result = HAL_SPI_Transmit(hspi, cmd, sizeof(cmd), 100);
+
+    if (result == HAL_OK)
     {
-        st = HAL_SPI_Receive(hspi, data, len, 100);
+        result = HAL_SPI_Receive(hspi, data, len, 100);
     }
 
     Fram_CsHigh();
 
-    return st;
+    return result;
 }
 
 HAL_StatusTypeDef Fram_Write(SPI_HandleTypeDef *hspi,
@@ -271,10 +276,10 @@ HAL_StatusTypeDef Fram_Write(SPI_HandleTypeDef *hspi,
                              const uint8_t *data,
                              uint16_t len)
 {
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef result;
     uint8_t cmd[3];
 
-    if (hspi == NULL || data == NULL || len == 0U)
+    if (hspi == NULL || data == NULL || len == 0)
     {
         return HAL_ERROR;
     }
@@ -284,37 +289,105 @@ HAL_StatusTypeDef Fram_Write(SPI_HandleTypeDef *hspi,
         return HAL_ERROR;
     }
 
-    st = Fram_WriteEnable(hspi);
-    if (st != HAL_OK)
+    result = Fram_WriteEnable(hspi);
+
+    if (result != HAL_OK)
     {
-        return st;
+        return result;
     }
 
     cmd[0] = FRAM_CMD_WRITE;
     cmd[1] = (uint8_t)(addr >> 8);
-    cmd[2] = (uint8_t)(addr & 0xFFU);
+    cmd[2] = (uint8_t)addr;
 
     Fram_CsLow();
 
-    st = HAL_SPI_Transmit(hspi, cmd, sizeof(cmd), 100);
-    if (st == HAL_OK)
+    result = HAL_SPI_Transmit(hspi, cmd, sizeof(cmd), 100);
+
+    if (result == HAL_OK)
     {
-        st = HAL_SPI_Transmit(hspi, (uint8_t *)data, len, 100);
+        result = HAL_SPI_Transmit(hspi, (uint8_t *)data, len, 100);
     }
 
     Fram_CsHigh();
 
-    /*
-     * MB85RS64 normally resets WEL after WRITE.
-     * WRDI is harmless and keeps the state explicit.
-     */
     (void)Fram_WriteDisable(hspi);
 
-    return st;
+    return result;
 }
 
+static void Net_SetInfo(void)
+{
+    uint8_t lock = SYS_NET_LOCK;
 
+    (void)ctlwizchip(CW_SYS_UNLOCK, &lock);
+    (void)ctlnetwork(CN_SET_NETINFO, &netinfo);
+}
 
+void Net_TaskRun(void *argument)
+{
+    uint8_t mem[16] = {
+        2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2
+    };
+    uint8_t status = 0;
 
+    (void)argument;
 
+    osDelay(500);
 
+    printf("[NET] start\r\n");
+
+    (void)Fram_InitPins();
+
+    if (Fram_ReadStatus(&hspi3, &status) == HAL_OK)
+    {
+        printf("[NET] FRAM status=0x%02X\r\n", status);
+    }
+
+    if (MacEeprom_ReadMac(&hi2c1, netinfo.mac) != HAL_OK ||
+        MacEeprom_IsMacPlausible(netinfo.mac) == 0)
+    {
+        printf("[NET] MAC fail\r\n");
+
+        for (;;)
+        {
+            osDelay(1000);
+        }
+    }
+
+    printf("[NET] MAC %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+           netinfo.mac[0],
+           netinfo.mac[1],
+           netinfo.mac[2],
+           netinfo.mac[3],
+           netinfo.mac[4],
+           netinfo.mac[5]);
+
+    W6100_RegisterCallback();
+    W6100_Reset();
+
+    if (ctlwizchip(CW_INIT_WIZCHIP, mem) != 0)
+    {
+        printf("[NET] W6100 init fail\r\n");
+    }
+
+    Net_SetInfo();
+
+    printf("[NET] IP %u.%u.%u.%u PORT %u\r\n",
+           netinfo.ip[0],
+           netinfo.ip[1],
+           netinfo.ip[2],
+           netinfo.ip[3],
+           TCP_PORT);
+
+    for (;;)
+    {
+        (void)TcpCmdServer_Process(TCP_SOCKET,
+                                   tcp_buf,
+                                   TCP_PORT,
+                                   TCP_CMD_MODE_IPV4);
+
+        osDelay(1);
+    }
+}

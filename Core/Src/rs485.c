@@ -5,141 +5,118 @@
 #include "cmsis_os.h"
 #include "motor.h"
 
-#include <string.h>
-#include <unistd.h>
-#include <stdio.h>
+#include <stdint.h>
 
 /*
- * rs485.c
- *
- * 이 파일 하나에서 RS485 관련 기능을 모두 처리한다.
- *
- * ------------------------------------------------------------
- * 1. CLI RS485
- * ------------------------------------------------------------
- * USART6 : CLI terminal
- * PF12   : RS485_3 direction pin
- *
- * printf() 출력은 여기 있는 _write()를 통해 CLI RS485로 나간다.
- *
- * ------------------------------------------------------------
- * 2. Motor RS485
- * ------------------------------------------------------------
- * UART5  : AIMotor Modbus RTU
- * PD13   : RS485_2 direction pin
- *
- * motor.c는 Bus_Write16 / Bus_Write32 / Bus_Read32 이름으로
- * 이 파일의 Modbus 함수를 사용한다.
+ * CLI RS485  : USART6, RS485_3 direction pin, printf output
+ * Motor RS485: UART5,  RS485_2 direction pin, AIMotor Modbus RTU
  */
 
-/* ============================================================
- * CLI RS485 section
- * ============================================================ */
+#define CLI_UART_HANDLE      huart6
+#define CLI_TX_TIMEOUT_MS    100
 
-#define CLI_UART_HANDLE              huart6
-#define CLI_TX_TIMEOUT_MS            100U
+#define MOTOR_TX_TIMEOUT_MS  100
+#define MOTOR_RX_TIMEOUT_MS  500
+#define MOTOR_FRAME_GAP_MS   10
 
 extern osMutexId_t CliprintMutexHandle;
+extern osMutexId_t MotorBusMutexHandle;
 
-static uint8_t CliNeedMutex(void)
+static uint16_t ModbusCrc(const uint8_t *buf, uint16_t len)
 {
-    if (CliprintMutexHandle == NULL)
+    uint16_t crc = 0xFFFF;
+
+    for (uint16_t i = 0; i < len; i++)
     {
-        return 0U;
+        crc ^= buf[i];
+
+        for (uint8_t bit = 0; bit < 8; bit++)
+        {
+            if ((crc & 1) != 0)
+            {
+                crc >>= 1;
+                crc ^= 0xA001;
+            }
+            else
+            {
+                crc >>= 1;
+            }
+        }
     }
 
-    if (osKernelGetState() != osKernelRunning)
-    {
-        return 0U;
-    }
-
-    return 1U;
+    return crc;
 }
 
-static void ShortDelay(void)
+static HAL_StatusTypeDef CheckCrc(const uint8_t *rx, uint16_t len)
 {
-    for (volatile uint32_t i = 0U; i < 300U; i++)
+    uint16_t calc;
+    uint16_t recv;
+
+    if (rx == NULL || len < 2)
     {
-        __NOP();
+        motor_debug.crc_ok = 0;
+        return HAL_ERROR;
     }
+
+    calc = ModbusCrc(rx, (uint16_t)(len - 2));
+    recv = ((uint16_t)rx[len - 1] << 8) | rx[len - 2];
+
+    motor_debug.crc_calc = calc;
+    motor_debug.crc_recv = recv;
+    motor_debug.crc_ok = (calc == recv) ? 1 : 0;
+
+    return (calc == recv) ? HAL_OK : HAL_ERROR;
 }
 
 void CliRs485_SetTx(void)
 {
     HAL_GPIO_WritePin(RS485_3_GPIO_Port, RS485_3_Pin, GPIO_PIN_SET);
-    ShortDelay();
 }
 
 void CliRs485_SetRx(void)
 {
     HAL_GPIO_WritePin(RS485_3_GPIO_Port, RS485_3_Pin, GPIO_PIN_RESET);
-    ShortDelay();
 }
 
 HAL_StatusTypeDef CliRs485_Write(const uint8_t *data,
                                  uint16_t len,
                                  uint32_t timeout)
 {
-    HAL_StatusTypeDef st;
-    uint32_t start_tick;
-    uint8_t locked = 0U;
+    HAL_StatusTypeDef result;
+    uint8_t locked = 0;
 
-    if (data == NULL || len == 0U)
+    if (data == NULL || len == 0)
     {
         return HAL_ERROR;
     }
 
-    if (CliNeedMutex() != 0U)
+    if (CliprintMutexHandle != NULL && osKernelGetState() == osKernelRunning)
     {
         if (osMutexAcquire(CliprintMutexHandle, timeout) == osOK)
         {
-            locked = 1U;
+            locked = 1;
         }
     }
 
     CliRs485_SetTx();
+    HAL_Delay(1);
 
-    /*
-     * RS485 transceiver가 TX 모드로 바뀔 시간.
-     * 앞 글자 깨짐 방지.
-     */
-    HAL_Delay(1U);
+    result = HAL_UART_Transmit(&CLI_UART_HANDLE,
+                               (uint8_t *)data,
+                               len,
+                               timeout);
 
-    st = HAL_UART_Transmit(&CLI_UART_HANDLE,
-                           (uint8_t *)data,
-                           len,
-                           timeout);
-
-    start_tick = HAL_GetTick();
-
-    while (__HAL_UART_GET_FLAG(&CLI_UART_HANDLE, UART_FLAG_TC) == RESET)
-    {
-        if ((HAL_GetTick() - start_tick) > timeout)
-        {
-            st = HAL_TIMEOUT;
-            break;
-        }
-    }
-
-    /*
-     * 마지막 stop bit까지 완전히 나간 뒤 RX로 복귀.
-     */
-    HAL_Delay(1U);
-
+    HAL_Delay(1);
     CliRs485_SetRx();
 
-    if (locked != 0U)
+    if (locked != 0)
     {
         (void)osMutexRelease(CliprintMutexHandle);
     }
 
-    return st;
+    return result;
 }
 
-/*
- * retarget.c를 없애기 위해 _write()를 이 파일로 이동.
- * syscalls.c의 _write는 weak라서 이 함수가 우선 적용된다.
- */
 int _write(int file, char *ptr, int len)
 {
     (void)file;
@@ -156,32 +133,6 @@ int _write(int file, char *ptr, int len)
     return len;
 }
 
-/* ============================================================
- * Motor RS485 / Modbus RTU section
- * ============================================================ */
-
-#define MOTOR_TX_TIMEOUT_MS          100U
-#define MOTOR_RX_TIMEOUT_MS          500U
-#define MOTOR_TC_TIMEOUT_MS          100U
-#define MOTOR_FRAME_GAP_MS           10U
-
-extern osMutexId_t MotorBusMutexHandle;
-
-static uint8_t MotorNeedMutex(void)
-{
-    if (MotorBusMutexHandle == NULL)
-    {
-        return 0U;
-    }
-
-    if (osKernelGetState() != osKernelRunning)
-    {
-        return 0U;
-    }
-
-    return 1U;
-}
-
 static void MotorRs485_SetTx(void)
 {
     HAL_GPIO_WritePin(RS485_2_GPIO_Port, RS485_2_Pin, GPIO_PIN_SET);
@@ -192,175 +143,79 @@ void MotorRs485_SetRx(void)
     HAL_GPIO_WritePin(RS485_2_GPIO_Port, RS485_2_Pin, GPIO_PIN_RESET);
 }
 
-static void MotorClearUartError(UART_HandleTypeDef *huart)
+static void ClearMotorUart(UART_HandleTypeDef *huart)
 {
-    if (huart == NULL)
-    {
-        return;
-    }
+    volatile uint8_t dummy;
 
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_PEFLAG(huart);
-
     huart->ErrorCode = HAL_UART_ERROR_NONE;
-    motor_debug.uart_error = 0U;
-}
-
-static void MotorClearRxBuffer(UART_HandleTypeDef *huart)
-{
-    volatile uint8_t dummy;
-
-    if (huart == NULL)
-    {
-        return;
-    }
 
     while (__HAL_UART_GET_FLAG(huart, UART_FLAG_RXNE) != RESET)
     {
-        dummy = (uint8_t)(huart->Instance->DR & 0xFFU);
+        dummy = (uint8_t)(huart->Instance->DR & 0xFF);
         (void)dummy;
     }
+
+    motor_debug.uart_error = 0;
 }
 
-static uint16_t ModbusCrc(const uint8_t *buf, uint16_t len)
+static HAL_StatusTypeDef MotorSendReceive(UART_HandleTypeDef *huart,
+                                          uint8_t *tx,
+                                          uint16_t tx_len,
+                                          uint8_t *rx,
+                                          uint16_t rx_len)
 {
-    uint16_t crc = 0xFFFFU;
-
-    for (uint16_t i = 0U; i < len; i++)
-    {
-        crc ^= (uint16_t)buf[i];
-
-        for (uint8_t bit = 0U; bit < 8U; bit++)
-        {
-            if ((crc & 0x0001U) != 0U)
-            {
-                crc >>= 1U;
-                crc ^= 0xA001U;
-            }
-            else
-            {
-                crc >>= 1U;
-            }
-        }
-    }
-
-    return crc;
-}
-
-static HAL_StatusTypeDef ModbusCheckCrc(const uint8_t *rx, uint16_t len)
-{
-    uint16_t calc;
-    uint16_t recv;
-
-    if (rx == NULL || len < 2U)
-    {
-        motor_debug.crc_ok = 0U;
-        return HAL_ERROR;
-    }
-
-    calc = ModbusCrc(rx, (uint16_t)(len - 2U));
-    recv = ((uint16_t)rx[len - 1U] << 8U) | rx[len - 2U];
-
-    motor_debug.crc_calc = calc;
-    motor_debug.crc_recv = recv;
-
-    if (calc != recv)
-    {
-        motor_debug.crc_ok = 0U;
-        return HAL_ERROR;
-    }
-
-    motor_debug.crc_ok = 1U;
-    return HAL_OK;
-}
-
-static HAL_StatusTypeDef MotorWaitTxDone(UART_HandleTypeDef *huart)
-{
-    uint32_t start_tick;
-
-    if (huart == NULL)
-    {
-        return HAL_ERROR;
-    }
-
-    start_tick = HAL_GetTick();
-
-    while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC) == RESET)
-    {
-        if ((HAL_GetTick() - start_tick) > MOTOR_TC_TIMEOUT_MS)
-        {
-            motor_debug.uart_error = huart->ErrorCode;
-            return HAL_TIMEOUT;
-        }
-    }
-
-    return HAL_OK;
-}
-
-static HAL_StatusTypeDef MotorSendAndReceive(UART_HandleTypeDef *huart,
-                                             uint8_t *tx,
-                                             uint16_t tx_len,
-                                             uint8_t *rx,
-                                             uint16_t rx_len)
-{
-    HAL_StatusTypeDef st;
-    uint8_t locked = 0U;
+    HAL_StatusTypeDef result;
+    uint8_t locked = 0;
 
     if (huart == NULL || tx == NULL || rx == NULL)
     {
-        motor_state.last_hal = HAL_ERROR;
+        motor_state.last_result = HAL_ERROR;
         return HAL_ERROR;
     }
 
-    if (MotorNeedMutex() != 0U)
+    if (MotorBusMutexHandle != NULL && osKernelGetState() == osKernelRunning)
     {
         if (osMutexAcquire(MotorBusMutexHandle, osWaitForever) == osOK)
         {
-            locked = 1U;
+            locked = 1;
         }
     }
 
-    MotorClearRxBuffer(huart);
-    MotorClearUartError(huart);
-
-    memset(rx, 0, rx_len);
+    ClearMotorUart(huart);
 
     MotorRs485_SetTx();
-    HAL_Delay(1U);
+    HAL_Delay(1);
 
-    st = HAL_UART_Transmit(huart,
-                           tx,
-                           tx_len,
-                           MOTOR_TX_TIMEOUT_MS);
-
-    if (st == HAL_OK)
-    {
-        st = MotorWaitTxDone(huart);
-    }
+    result = HAL_UART_Transmit(huart,
+                               tx,
+                               tx_len,
+                               MOTOR_TX_TIMEOUT_MS);
 
     MotorRs485_SetRx();
 
-    if (st == HAL_OK)
+    if (result == HAL_OK)
     {
-        st = HAL_UART_Receive(huart,
-                              rx,
-                              rx_len,
-                              MOTOR_RX_TIMEOUT_MS);
+        result = HAL_UART_Receive(huart,
+                                  rx,
+                                  rx_len,
+                                  MOTOR_RX_TIMEOUT_MS);
     }
 
     HAL_Delay(MOTOR_FRAME_GAP_MS);
 
-    motor_state.last_hal = st;
+    motor_state.last_result = result;
     motor_debug.uart_error = huart->ErrorCode;
 
-    if (locked != 0U)
+    if (locked != 0)
     {
         (void)osMutexRelease(MotorBusMutexHandle);
     }
 
-    return st;
+    return result;
 }
 
 HAL_StatusTypeDef MotorBus_WriteU16(UART_HandleTypeDef *huart,
@@ -370,28 +225,28 @@ HAL_StatusTypeDef MotorBus_WriteU16(UART_HandleTypeDef *huart,
     uint8_t tx[8];
     uint8_t rx[8];
     uint16_t crc;
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef result;
 
     motor_debug.last_reg = reg;
-    motor_debug.exception_code = 0U;
-    motor_debug.crc_ok = 0U;
+    motor_debug.exception_code = 0;
+    motor_debug.crc_ok = 0;
 
     tx[0] = (uint8_t)MOTOR_ID;
-    tx[1] = 0x06U;
-    tx[2] = (uint8_t)((reg >> 8U) & 0xFFU);
-    tx[3] = (uint8_t)(reg & 0xFFU);
-    tx[4] = (uint8_t)((value >> 8U) & 0xFFU);
-    tx[5] = (uint8_t)(value & 0xFFU);
+    tx[1] = 0x06;
+    tx[2] = (uint8_t)(reg >> 8);
+    tx[3] = (uint8_t)reg;
+    tx[4] = (uint8_t)(value >> 8);
+    tx[5] = (uint8_t)value;
 
-    crc = ModbusCrc(tx, 6U);
-    tx[6] = (uint8_t)(crc & 0xFFU);
-    tx[7] = (uint8_t)((crc >> 8U) & 0xFFU);
+    crc = ModbusCrc(tx, 6);
+    tx[6] = (uint8_t)crc;
+    tx[7] = (uint8_t)(crc >> 8);
 
-    st = MotorSendAndReceive(huart, tx, 8U, rx, 8U);
+    result = MotorSendReceive(huart, tx, 8, rx, 8);
 
-    if (st != HAL_OK)
+    if (result != HAL_OK)
     {
-        return st;
+        return result;
     }
 
     if (rx[0] != (uint8_t)MOTOR_ID)
@@ -399,23 +254,18 @@ HAL_StatusTypeDef MotorBus_WriteU16(UART_HandleTypeDef *huart,
         return HAL_ERROR;
     }
 
-    if (rx[1] == 0x86U)
+    if (rx[1] == 0x86)
     {
         motor_debug.exception_code = rx[2];
         return HAL_ERROR;
     }
 
-    if (rx[1] != 0x06U)
+    if (rx[1] != 0x06 || CheckCrc(rx, 8) != HAL_OK)
     {
         return HAL_ERROR;
     }
 
-    if (ModbusCheckCrc(rx, 8U) != HAL_OK)
-    {
-        return HAL_ERROR;
-    }
-
-    for (uint8_t i = 0U; i < 6U; i++)
+    for (uint8_t i = 0; i < 6; i++)
     {
         if (rx[i] != tx[i])
         {
@@ -433,131 +283,61 @@ HAL_StatusTypeDef MotorBus_WriteI32(UART_HandleTypeDef *huart,
     uint8_t tx[13];
     uint8_t rx[8];
     uint16_t crc;
-    uint32_t raw;
-    uint16_t low_word;
-    uint16_t high_word;
-    HAL_StatusTypeDef st;
-
-    if (huart == NULL)
-    {
-        motor_state.last_hal = HAL_ERROR;
-        return HAL_ERROR;
-    }
-
-    /*
-     * 중요:
-     * H11_12 같은 32bit 파라미터는 06H 두 번으로 쓰면
-     * 모터가 응답하지 않는 경우가 있다.
-     *
-     * 따라서 10H Multiple Register Write로 2개 register를 한 번에 쓴다.
-     *
-     * 현재 pos read 결과 기준:
-     *   reg     = low word
-     *   reg + 1 = high word
-     */
-    raw = (uint32_t)value;
-    low_word  = (uint16_t)(raw & 0xFFFFU);
-    high_word = (uint16_t)((raw >> 16U) & 0xFFFFU);
+    uint32_t raw = (uint32_t)value;
+    uint16_t low_word = (uint16_t)raw;
+    uint16_t high_word = (uint16_t)(raw >> 16);
+    HAL_StatusTypeDef result;
 
     motor_debug.last_reg = reg;
-    motor_debug.exception_code = 0U;
-    motor_debug.crc_ok = 0U;
+    motor_debug.exception_code = 0;
+    motor_debug.crc_ok = 0;
 
-    tx[0]  = (uint8_t)MOTOR_ID;
-    tx[1]  = 0x10U;
-    tx[2]  = (uint8_t)((reg >> 8U) & 0xFFU);
-    tx[3]  = (uint8_t)(reg & 0xFFU);
-    tx[4]  = 0x00U;
-    tx[5]  = 0x02U;
-    tx[6]  = 0x04U;
+    tx[0] = (uint8_t)MOTOR_ID;
+    tx[1] = 0x10;
+    tx[2] = (uint8_t)(reg >> 8);
+    tx[3] = (uint8_t)reg;
+    tx[4] = 0x00;
+    tx[5] = 0x02;
+    tx[6] = 0x04;
 
-    /*
-     * low word first
-     */
-    tx[7]  = (uint8_t)((low_word >> 8U) & 0xFFU);
-    tx[8]  = (uint8_t)(low_word & 0xFFU);
+    /* AIMotor observed order: low word first, high word second */
+    tx[7]  = (uint8_t)(low_word >> 8);
+    tx[8]  = (uint8_t)low_word;
+    tx[9]  = (uint8_t)(high_word >> 8);
+    tx[10] = (uint8_t)high_word;
 
-    /*
-     * high word second
-     */
-    tx[9]  = (uint8_t)((high_word >> 8U) & 0xFFU);
-    tx[10] = (uint8_t)(high_word & 0xFFU);
+    crc = ModbusCrc(tx, 11);
+    tx[11] = (uint8_t)crc;
+    tx[12] = (uint8_t)(crc >> 8);
 
-    crc = ModbusCrc(tx, 11U);
-    tx[11] = (uint8_t)(crc & 0xFFU);
-    tx[12] = (uint8_t)((crc >> 8U) & 0xFFU);
+    result = MotorSendReceive(huart, tx, 13, rx, 8);
 
-    st = MotorSendAndReceive(huart, tx, 13U, rx, 8U);
-
-    if (st != HAL_OK)
+    if (result != HAL_OK)
     {
-        motor_state.last_hal = st;
-
-        printf("[BUS_DBG] write32 timeout/fail reg=0x%04X value=%ld st=%d uart=0x%08lX\r\n",
-               reg,
-               (long)value,
-               st,
-               (unsigned long)motor_debug.uart_error);
-
-        return st;
+        return result;
     }
 
-    /*
-     * Modbus exception response
-     */
-    if (rx[0] == (uint8_t)MOTOR_ID && rx[1] == 0x90U)
+    if (rx[0] != (uint8_t)MOTOR_ID)
+    {
+        return HAL_ERROR;
+    }
+
+    if (rx[1] == 0x90)
     {
         motor_debug.exception_code = rx[2];
-
-        printf("[BUS_DBG] write32 exception reg=0x%04X ex=%u raw=%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-               reg,
-               motor_debug.exception_code,
-               rx[0], rx[1], rx[2], rx[3],
-               rx[4], rx[5], rx[6], rx[7]);
-
         return HAL_ERROR;
     }
 
-    if (rx[0] != (uint8_t)MOTOR_ID || rx[1] != 0x10U)
+    if (rx[1] != 0x10 || CheckCrc(rx, 8) != HAL_OK)
     {
-        printf("[BUS_DBG] write32 bad response reg=0x%04X raw=%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-               reg,
-               rx[0], rx[1], rx[2], rx[3],
-               rx[4], rx[5], rx[6], rx[7]);
-
         return HAL_ERROR;
     }
 
-    if (ModbusCheckCrc(rx, 8U) != HAL_OK)
+    if (rx[2] != tx[2] || rx[3] != tx[3] || rx[4] != 0x00 || rx[5] != 0x02)
     {
-        printf("[BUS_DBG] write32 crc fail reg=0x%04X calc=0x%04X recv=0x%04X raw=%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-               reg,
-               motor_debug.crc_calc,
-               motor_debug.crc_recv,
-               rx[0], rx[1], rx[2], rx[3],
-               rx[4], rx[5], rx[6], rx[7]);
-
         return HAL_ERROR;
     }
 
-    /*
-     * 표준 10H 응답:
-     * ID, 10H, start addr hi, start addr lo, count hi, count lo, CRC lo, CRC hi
-     */
-    if (rx[2] != tx[2] ||
-        rx[3] != tx[3] ||
-        rx[4] != 0x00U ||
-        rx[5] != 0x02U)
-    {
-        printf("[BUS_DBG] write32 addr/count mismatch reg=0x%04X raw=%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-               reg,
-               rx[0], rx[1], rx[2], rx[3],
-               rx[4], rx[5], rx[6], rx[7]);
-
-        return HAL_ERROR;
-    }
-
-    motor_state.last_hal = HAL_OK;
     return HAL_OK;
 }
 
@@ -571,33 +351,34 @@ HAL_StatusTypeDef MotorBus_ReadI32(UART_HandleTypeDef *huart,
     uint16_t low_word;
     uint16_t high_word;
     uint32_t raw;
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef result;
 
-    if (huart == NULL || value == NULL)
+    if (value == NULL)
     {
+        motor_state.last_result = HAL_ERROR;
         return HAL_ERROR;
     }
 
     motor_debug.last_reg = reg;
-    motor_debug.exception_code = 0U;
-    motor_debug.crc_ok = 0U;
+    motor_debug.exception_code = 0;
+    motor_debug.crc_ok = 0;
 
     tx[0] = (uint8_t)MOTOR_ID;
-    tx[1] = 0x03U;
-    tx[2] = (uint8_t)((reg >> 8U) & 0xFFU);
-    tx[3] = (uint8_t)(reg & 0xFFU);
-    tx[4] = 0x00U;
-    tx[5] = 0x02U;
+    tx[1] = 0x03;
+    tx[2] = (uint8_t)(reg >> 8);
+    tx[3] = (uint8_t)reg;
+    tx[4] = 0x00;
+    tx[5] = 0x02;
 
-    crc = ModbusCrc(tx, 6U);
-    tx[6] = (uint8_t)(crc & 0xFFU);
-    tx[7] = (uint8_t)((crc >> 8U) & 0xFFU);
+    crc = ModbusCrc(tx, 6);
+    tx[6] = (uint8_t)crc;
+    tx[7] = (uint8_t)(crc >> 8);
 
-    st = MotorSendAndReceive(huart, tx, 8U, rx, 9U);
+    result = MotorSendReceive(huart, tx, 8, rx, 9);
 
-    if (st != HAL_OK)
+    if (result != HAL_OK)
     {
-        return st;
+        return result;
     }
 
     if (rx[0] != (uint8_t)MOTOR_ID)
@@ -605,41 +386,28 @@ HAL_StatusTypeDef MotorBus_ReadI32(UART_HandleTypeDef *huart,
         return HAL_ERROR;
     }
 
-    if (rx[1] == 0x83U)
+    if (rx[1] == 0x83)
     {
         motor_debug.exception_code = rx[2];
         return HAL_ERROR;
     }
 
-    if (rx[1] != 0x03U || rx[2] != 0x04U)
+    if (rx[1] != 0x03 || rx[2] != 0x04 || CheckCrc(rx, 9) != HAL_OK)
     {
         return HAL_ERROR;
     }
 
-    if (ModbusCheckCrc(rx, 9U) != HAL_OK)
-    {
-        return HAL_ERROR;
-    }
+    /* AIMotor observed order: first word = low, second word = high */
+    low_word = ((uint16_t)rx[3] << 8) | rx[4];
+    high_word = ((uint16_t)rx[5] << 8) | rx[6];
 
-    /*
-     * AIMotor 32-bit monitor order:
-     * first word = low word
-     * second word = high word
-     */
-    low_word = ((uint16_t)rx[3] << 8U) | rx[4];
-    high_word = ((uint16_t)rx[5] << 8U) | rx[6];
-
-    raw = ((uint32_t)high_word << 16U) | low_word;
+    raw = ((uint32_t)high_word << 16) | low_word;
 
     *value = (int32_t)raw;
     motor_debug.last_pos = *value;
 
     return HAL_OK;
 }
-
-/* ============================================================
- * Common init section
- * ============================================================ */
 
 void RS485_Init(void)
 {
