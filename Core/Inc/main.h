@@ -63,10 +63,13 @@ void Error_Handler(void);
 #define DI_1_GPIO_Port GPIOE
 #define DI_2_Pin GPIO_PIN_6
 #define DI_2_GPIO_Port GPIOE
-#define Home_sensor_Pin GPIO_PIN_8
-#define Home_sensor_GPIO_Port GPIOF
-#define LAMP_LED_Pin GPIO_PIN_0
-#define LAMP_LED_GPIO_Port GPIOC
+#define DI_3_btn_Pin GPIO_PIN_13
+#define DI_3_btn_GPIO_Port GPIOC
+#define DI_3_btn_EXTI_IRQn EXTI15_10_IRQn
+#define DI_5_Pin GPIO_PIN_7
+#define DI_5_GPIO_Port GPIOF
+#define DI_4_Pin GPIO_PIN_8
+#define DI_4_GPIO_Port GPIOF
 #define W610_CS_Pin GPIO_PIN_0
 #define W610_CS_GPIO_Port GPIOA
 #define FRAM_CS_Pin GPIO_PIN_4

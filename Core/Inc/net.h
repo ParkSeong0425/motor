@@ -1,75 +1,21 @@
-/*
- * net.h
- *
- *  Created on: Jun 10, 2026
- *      Author: HWNOT
- */
+#ifndef NET_H
+#define NET_H
 
-#ifndef INC_NET_H_
-#define INC_NET_H_
-
-#include "main.h"
 #include <stdint.h>
 
-#define MAC_EEPROM_I2C_ADDR_7BIT      0x50U
-#define MAC_EEPROM_I2C_ADDR_HAL       (MAC_EEPROM_I2C_ADDR_7BIT << 1)
+/* MAC EEPROM의 I2C 주소, HAL 함수용이라 0x50을 왼쪽으로 1칸 민 값 */
+#define MAC_ADDR    (0x50 << 1)
 
-#define MAC_EEPROM_SIZE_BYTES         256U
-#define MAC_EEPROM_EUI48_OFFSET       0xFAU
-#define MAC_EEPROM_EUI48_LEN          6U
+/* EEPROM 안에서 MAC 주소가 시작되는 위치 */
+#define MAC_POS     0xFA
 
-HAL_StatusTypeDef MacEeprom_IsReady(I2C_HandleTypeDef *hi2c);
+/* MAC 주소 길이, MAC은 항상 6바이트 */
+#define MAC_LEN     6
 
-HAL_StatusTypeDef MacEeprom_Read(I2C_HandleTypeDef *hi2c,
-                                 uint8_t mem_addr,
-                                 uint8_t *data,
-                                 uint16_t len);
-
-HAL_StatusTypeDef MacEeprom_ReadByte(I2C_HandleTypeDef *hi2c,
-                                     uint8_t mem_addr,
-                                     uint8_t *value);
-
-HAL_StatusTypeDef MacEeprom_ReadMac(I2C_HandleTypeDef *hi2c,
-                                    uint8_t mac[MAC_EEPROM_EUI48_LEN]);
-
-uint8_t MacEeprom_IsMacPlausible(const uint8_t mac[MAC_EEPROM_EUI48_LEN]);
-
-
+/*
+ * W6100 / TCP 네트워크 태스크.
+ * FreeRTOS NetTask에서 이 함수 하나만 실행하면 된다.
+ */
 void Net_TaskRun(void *argument);
 
-
-#define FRAM_MB85RS64_SIZE_BYTES      8192U
-
-#define FRAM_STATUS_WPEN              0x80U
-#define FRAM_STATUS_BP1               0x08U
-#define FRAM_STATUS_BP0               0x04U
-#define FRAM_STATUS_WEL               0x02U
-
-HAL_StatusTypeDef Fram_InitPins(void);
-
-HAL_StatusTypeDef Fram_ReadStatus(SPI_HandleTypeDef *hspi,
-                                  uint8_t *status);
-
-HAL_StatusTypeDef Fram_WriteEnable(SPI_HandleTypeDef *hspi);
-
-HAL_StatusTypeDef Fram_WriteDisable(SPI_HandleTypeDef *hspi);
-
-HAL_StatusTypeDef Fram_CheckWriteEnableLatch(SPI_HandleTypeDef *hspi,
-                                             uint8_t *status_before,
-                                             uint8_t *status_after_wren,
-                                             uint8_t *status_after_wrdi);
-
-HAL_StatusTypeDef Fram_Read(SPI_HandleTypeDef *hspi,
-                            uint16_t addr,
-                            uint8_t *data,
-                            uint16_t len);
-
-HAL_StatusTypeDef Fram_Write(SPI_HandleTypeDef *hspi,
-                             uint16_t addr,
-                             const uint8_t *data,
-                             uint16_t len);
-
-
-
-
-#endif /* INC_NET_H_ */
+#endif

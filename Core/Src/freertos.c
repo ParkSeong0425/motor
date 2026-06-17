@@ -28,6 +28,7 @@
 #include "cli.h"
 #include "motor.h"
 #include "net.h"
+#include "storage.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,13 +57,6 @@ const osThreadAttr_t defaultTask_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
-/* Definitions for TcpTask */
-osThreadId_t TcpTaskHandle;
-const osThreadAttr_t TcpTask_attributes = {
-  .name = "TcpTask",
-  .stack_size = 2048 * 4,
-  .priority = (osPriority_t) osPriorityLow,
-};
 /* Definitions for MotorTask */
 osThreadId_t MotorTaskHandle;
 const osThreadAttr_t MotorTask_attributes = {
@@ -76,6 +70,13 @@ const osThreadAttr_t CliTask_attributes = {
   .name = "CliTask",
   .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for NetTask */
+osThreadId_t NetTaskHandle;
+const osThreadAttr_t NetTask_attributes = {
+  .name = "NetTask",
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* Definitions for MotorQueue */
 osMessageQueueId_t MotorQueueHandle;
@@ -99,9 +100,9 @@ const osMutexAttr_t MotorBusMutex_attributes = {
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
-void StartTcpTask(void *argument);
 void StartMotorTask(void *argument);
 void StartCliTask(void *argument);
+void StartNetTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -112,7 +113,7 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
-
+	(void)St_Init();
   /* USER CODE END Init */
   /* Create the mutex(es) */
   /* creation of CliprintMutex */
@@ -132,33 +133,23 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* creation of MotorQueue */
-  MotorQueueHandle = osMessageQueueNew(8,
-                                        sizeof(MotorCommand_t),
-                                        &MotorQueue_attributes);
+  MotorQueueHandle = osMessageQueueNew (8, sizeof(MotorCommand_t), &MotorQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
   /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask,
-                                  NULL,
-                                  &defaultTask_attributes);
-
-  /* creation of TcpTask */
-  TcpTaskHandle = osThreadNew(StartTcpTask,
-                              NULL,
-                              &TcpTask_attributes);
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* creation of MotorTask */
-  MotorTaskHandle = osThreadNew(StartMotorTask,
-                                NULL,
-                                &MotorTask_attributes);
+  MotorTaskHandle = osThreadNew(StartMotorTask, NULL, &MotorTask_attributes);
 
   /* creation of CliTask */
-  CliTaskHandle = osThreadNew(StartCliTask,
-                              NULL,
-                              &CliTask_attributes);
+  CliTaskHandle = osThreadNew(StartCliTask, NULL, &CliTask_attributes);
+
+  /* creation of NetTask */
+  NetTaskHandle = osThreadNew(StartNetTask, NULL, &NetTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* USER CODE END RTOS_THREADS */
@@ -187,27 +178,6 @@ void StartDefaultTask(void *argument)
   }
 
   /* USER CODE END StartDefaultTask */
-}
-
-/* USER CODE BEGIN Header_StartTcpTask */
-/**
-* @brief Function implementing the TcpTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTcpTask */
-void StartTcpTask(void *argument)
-{
-  /* USER CODE BEGIN StartTcpTask */
-
-	  Net_TaskRun(argument);
-
-  for (;;)
-  {
-	    osDelay(1000);
-  }
-
-  /* USER CODE END StartTcpTask */
 }
 
 /* USER CODE BEGIN Header_StartMotorTask */
@@ -248,6 +218,25 @@ void StartCliTask(void *argument)
   }
 
   /* USER CODE END StartCliTask */
+}
+
+/* USER CODE BEGIN Header_StartNetTask */
+/**
+* @brief Function implementing the NetTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartNetTask */
+void StartNetTask(void *argument)
+{
+  /* USER CODE BEGIN StartNetTask */
+	  Net_TaskRun(argument);
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1000);
+  }
+  /* USER CODE END StartNetTask */
 }
 
 /* Private application code --------------------------------------------------*/

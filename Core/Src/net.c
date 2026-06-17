@@ -1,21 +1,35 @@
 #include "net.h"
 #include "cmsis_os.h"
 #include "i2c.h"
-#include "spi.h"
-#include "gpio.h"
+#include "cli.h"
+#include "storage.h"
+#include "motion_protocol.h"
 
 #include "wizchip_conf.h"
 #include "wiz6100_port.h"
-#include "tcp_cmd_server.h"
+#include "socket.h"
 
 #include <stdio.h>
+#include <string.h>
 
-#define TCP_SOCKET   0
-#define TCP_PORT     5000
+/* W6100 socket 번호 */
+static uint8_t sock = 0;
 
-static uint8_t tcp_buf[2048];
+/* PC TCP 포트 */
+static uint16_t port = 5000;
 
-static wiz_NetInfo netinfo = {
+/* TCP RX 버퍼 */
+static uint8_t buf[2048];
+
+/* TCP 로그/응답 버퍼 */
+static char log_buf[160];
+static char rx_cmd[192];
+static char tx_res[192];
+static uint16_t rx_len = 0;
+static uint32_t rx_tick = 0;
+
+/* W6100 네트워크 정보 */
+static wiz_NetInfo info = {
     .mac = {0, 0, 0, 0, 0, 0},
     .ip = {172, 20, 0, 192},
     .sn = {255, 255, 0, 0},
@@ -24,306 +38,177 @@ static wiz_NetInfo netinfo = {
     .ipmode = NETINFO_STATIC_V4
 };
 
-HAL_StatusTypeDef MacEeprom_IsReady(I2C_HandleTypeDef *hi2c)
-{
-    if (hi2c == NULL)
-    {
-        return HAL_ERROR;
-    }
-
-    return HAL_I2C_IsDeviceReady(hi2c,
-                                 MAC_EEPROM_I2C_ADDR_HAL,
-                                 3,
-                                 100);
-}
-
-HAL_StatusTypeDef MacEeprom_Read(I2C_HandleTypeDef *hi2c,
-                                 uint8_t addr,
-                                 uint8_t *data,
-                                 uint16_t len)
-{
-    if (hi2c == NULL || data == NULL || len == 0)
-    {
-        return HAL_ERROR;
-    }
-
-    if (((uint16_t)addr + len) > MAC_EEPROM_SIZE_BYTES)
-    {
-        return HAL_ERROR;
-    }
-
-    return HAL_I2C_Mem_Read(hi2c,
-                            MAC_EEPROM_I2C_ADDR_HAL,
-                            addr,
-                            I2C_MEMADD_SIZE_8BIT,
-                            data,
-                            len,
-                            100);
-}
-
-HAL_StatusTypeDef MacEeprom_ReadByte(I2C_HandleTypeDef *hi2c,
-                                     uint8_t addr,
-                                     uint8_t *value)
-{
-    return MacEeprom_Read(hi2c, addr, value, 1);
-}
-
-HAL_StatusTypeDef MacEeprom_ReadMac(I2C_HandleTypeDef *hi2c,
-                                    uint8_t mac[MAC_EEPROM_EUI48_LEN])
-{
-    return MacEeprom_Read(hi2c,
-                          MAC_EEPROM_EUI48_OFFSET,
-                          mac,
-                          MAC_EEPROM_EUI48_LEN);
-}
-
-uint8_t MacEeprom_IsMacPlausible(const uint8_t mac[MAC_EEPROM_EUI48_LEN])
+/* MAC 주소가 00:00... 또는 FF:FF... 인지 확인 */
+static uint8_t mac_ok(void)
 {
     uint8_t all_00 = 1;
     uint8_t all_ff = 1;
 
-    if (mac == NULL)
+    for (uint8_t i = 0; i < 6; i++)
     {
-        return 0;
+        if (info.mac[i] != 0x00) all_00 = 0;
+        if (info.mac[i] != 0xFF) all_ff = 0;
     }
 
-    for (uint8_t i = 0; i < MAC_EEPROM_EUI48_LEN; i++)
-    {
-        if (mac[i] != 0x00)
-        {
-            all_00 = 0;
-        }
-
-        if (mac[i] != 0xFF)
-        {
-            all_ff = 0;
-        }
-    }
-
-    if (all_00 != 0 || all_ff != 0)
-    {
-        return 0;
-    }
-
-    return 1;
+    return (uint8_t)((all_00 == 0 && all_ff == 0) ? 1u : 0u);
 }
 
-#define FRAM_CMD_WREN   0x06
-#define FRAM_CMD_WRDI   0x04
-#define FRAM_CMD_RDSR   0x05
-#define FRAM_CMD_READ   0x03
-#define FRAM_CMD_WRITE  0x02
-
-static void Fram_CsLow(void)
+/* MAC EEPROM에서 MAC 주소 6byte 읽기 */
+static HAL_StatusTypeDef mac(void)
 {
-    HAL_GPIO_WritePin(FRAM_CS_GPIO_Port, FRAM_CS_Pin, GPIO_PIN_RESET);
+    return HAL_I2C_Mem_Read(&hi2c1,
+                            MAC_ADDR,
+                            MAC_POS,
+                            I2C_MEMADD_SIZE_8BIT,
+                            info.mac,
+                            MAC_LEN,
+                            100);
 }
 
-static void Fram_CsHigh(void)
-{
-    HAL_GPIO_WritePin(FRAM_CS_GPIO_Port, FRAM_CS_Pin, GPIO_PIN_SET);
-}
-
-HAL_StatusTypeDef Fram_InitPins(void)
-{
-    Fram_CsHigh();
-    return HAL_OK;
-}
-
-static HAL_StatusTypeDef Fram_Cmd(SPI_HandleTypeDef *hspi, uint8_t cmd)
-{
-    HAL_StatusTypeDef result;
-
-    if (hspi == NULL)
-    {
-        return HAL_ERROR;
-    }
-
-    Fram_CsLow();
-    result = HAL_SPI_Transmit(hspi, &cmd, 1, 100);
-    Fram_CsHigh();
-
-    return result;
-}
-
-HAL_StatusTypeDef Fram_WriteEnable(SPI_HandleTypeDef *hspi)
-{
-    return Fram_Cmd(hspi, FRAM_CMD_WREN);
-}
-
-HAL_StatusTypeDef Fram_WriteDisable(SPI_HandleTypeDef *hspi)
-{
-    return Fram_Cmd(hspi, FRAM_CMD_WRDI);
-}
-
-HAL_StatusTypeDef Fram_ReadStatus(SPI_HandleTypeDef *hspi, uint8_t *status)
-{
-    HAL_StatusTypeDef result;
-    uint8_t cmd = FRAM_CMD_RDSR;
-    uint8_t rx = 0;
-
-    if (hspi == NULL || status == NULL)
-    {
-        return HAL_ERROR;
-    }
-
-    Fram_CsLow();
-
-    result = HAL_SPI_Transmit(hspi, &cmd, 1, 100);
-
-    if (result == HAL_OK)
-    {
-        result = HAL_SPI_Receive(hspi, &rx, 1, 100);
-    }
-
-    Fram_CsHigh();
-
-    if (result == HAL_OK)
-    {
-        *status = rx;
-    }
-
-    return result;
-}
-
-HAL_StatusTypeDef Fram_CheckWriteEnableLatch(SPI_HandleTypeDef *hspi,
-                                             uint8_t *before,
-                                             uint8_t *after_wren,
-                                             uint8_t *after_wrdi)
-{
-    HAL_StatusTypeDef result;
-
-    if (hspi == NULL || before == NULL ||
-        after_wren == NULL || after_wrdi == NULL)
-    {
-        return HAL_ERROR;
-    }
-
-    result = Fram_ReadStatus(hspi, before);
-
-    if (result == HAL_OK)
-    {
-        result = Fram_WriteEnable(hspi);
-    }
-
-    if (result == HAL_OK)
-    {
-        result = Fram_ReadStatus(hspi, after_wren);
-    }
-
-    if (result == HAL_OK)
-    {
-        result = Fram_WriteDisable(hspi);
-    }
-
-    if (result == HAL_OK)
-    {
-        result = Fram_ReadStatus(hspi, after_wrdi);
-    }
-
-    if (result != HAL_OK)
-    {
-        return result;
-    }
-
-    if (((*after_wren & FRAM_STATUS_WEL) == 0) ||
-        ((*after_wrdi & FRAM_STATUS_WEL) != 0))
-    {
-        return HAL_ERROR;
-    }
-
-    return HAL_OK;
-}
-
-HAL_StatusTypeDef Fram_Read(SPI_HandleTypeDef *hspi,
-                            uint16_t addr,
-                            uint8_t *data,
-                            uint16_t len)
-{
-    HAL_StatusTypeDef result;
-    uint8_t cmd[3];
-
-    if (hspi == NULL || data == NULL || len == 0)
-    {
-        return HAL_ERROR;
-    }
-
-    if (((uint32_t)addr + len) > FRAM_MB85RS64_SIZE_BYTES)
-    {
-        return HAL_ERROR;
-    }
-
-    cmd[0] = FRAM_CMD_READ;
-    cmd[1] = (uint8_t)(addr >> 8);
-    cmd[2] = (uint8_t)addr;
-
-    Fram_CsLow();
-
-    result = HAL_SPI_Transmit(hspi, cmd, sizeof(cmd), 100);
-
-    if (result == HAL_OK)
-    {
-        result = HAL_SPI_Receive(hspi, data, len, 100);
-    }
-
-    Fram_CsHigh();
-
-    return result;
-}
-
-HAL_StatusTypeDef Fram_Write(SPI_HandleTypeDef *hspi,
-                             uint16_t addr,
-                             const uint8_t *data,
-                             uint16_t len)
-{
-    HAL_StatusTypeDef result;
-    uint8_t cmd[3];
-
-    if (hspi == NULL || data == NULL || len == 0)
-    {
-        return HAL_ERROR;
-    }
-
-    if (((uint32_t)addr + len) > FRAM_MB85RS64_SIZE_BYTES)
-    {
-        return HAL_ERROR;
-    }
-
-    result = Fram_WriteEnable(hspi);
-
-    if (result != HAL_OK)
-    {
-        return result;
-    }
-
-    cmd[0] = FRAM_CMD_WRITE;
-    cmd[1] = (uint8_t)(addr >> 8);
-    cmd[2] = (uint8_t)addr;
-
-    Fram_CsLow();
-
-    result = HAL_SPI_Transmit(hspi, cmd, sizeof(cmd), 100);
-
-    if (result == HAL_OK)
-    {
-        result = HAL_SPI_Transmit(hspi, (uint8_t *)data, len, 100);
-    }
-
-    Fram_CsHigh();
-
-    (void)Fram_WriteDisable(hspi);
-
-    return result;
-}
-
-static void Net_SetInfo(void)
+/* W6100 MAC, IP, Subnet 설정 */
+static void set(void)
 {
     uint8_t lock = SYS_NET_LOCK;
 
     (void)ctlwizchip(CW_SYS_UNLOCK, &lock);
-    (void)ctlnetwork(CN_SET_NETINFO, &netinfo);
+    (void)ctlnetwork(CN_SET_NETINFO, &info);
 }
 
+/* TCP socket open */
+static void open(void)
+{
+    if (socket(sock, Sn_MR_TCP4, port, 0) != sock)
+    {
+        close(sock);
+    }
+}
+
+/* 문자열을 TCP로 전송 */
+static void tx(const char *s)
+{
+    int32_t ret;
+    uint16_t len;
+
+    if (s == NULL) return;
+
+    len = (uint16_t)strlen(s);
+    if (len == 0) return;
+
+    ret = send(sock, (uint8_t *)s, len);
+    if (ret <= 0) close(sock);
+}
+
+/* 수신된 명령 1개 실행 */
+static void run_cmd(void)
+{
+    if (rx_len == 0) return;
+
+    rx_cmd[rx_len] = '\0';
+    MotionProtocol_Command(rx_cmd, tx_res, sizeof(tx_res));
+    tx(tx_res);
+    rx_len = 0;
+}
+
+/* TCP 수신 데이터를 MotionProtocol 명령으로 처리 */
+static void rxcmd(void)
+{
+    uint16_t size;
+    int32_t ret;
+
+    size = getSn_RX_RSR(sock);
+
+    while (size > 0)
+    {
+        uint16_t n = size;
+
+        if (n > sizeof(buf)) n = sizeof(buf);
+
+        ret = recv(sock, buf, n);
+        if (ret <= 0)
+        {
+            close(sock);
+            return;
+        }
+
+        for (int32_t i = 0; i < ret; i++)
+        {
+            uint8_t c = buf[i];
+
+            if (c == '\r' || c == '\n')
+            {
+                run_cmd();
+            }
+            else if (rx_len < (sizeof(rx_cmd) - 1u))
+            {
+                rx_cmd[rx_len++] = (char)c;
+                rx_tick = osKernelGetTickCount();
+            }
+            else
+            {
+                rx_len = 0;
+                tx("01E_LONG\r\n");
+            }
+        }
+
+        size = getSn_RX_RSR(sock);
+    }
+}
+
+/* 개행 없이 들어온 명령도 잠깐 대기 후 실행 */
+static void rxidle(void)
+{
+    if (rx_len == 0) return;
+
+    if ((int32_t)(osKernelGetTickCount() - rx_tick) >= 20)
+    {
+        run_cmd();
+    }
+}
+
+/* MotionProtocol TCP 로그를 PC로 전송 */
+static void txlog(void)
+{
+    if (MotionProtocol_TakeTcpLog(log_buf, sizeof(log_buf)) == 0) return;
+    tx(log_buf);
+}
+
+/* TCP socket 상태별 open, listen, receive, send 처리 */
+static void tcp(void)
+{
+    uint8_t state;
+
+    state = getSn_SR(sock);
+
+    if (state == SOCK_CLOSED)
+    {
+        rx_len = 0;
+        open();
+        return;
+    }
+
+    if (state == SOCK_INIT)
+    {
+        (void)listen(sock);
+        return;
+    }
+
+    if (state == SOCK_ESTABLISHED)
+    {
+        rxcmd();
+        rxidle();
+        txlog();
+        return;
+    }
+
+    if (state == SOCK_CLOSE_WAIT)
+    {
+        rx_len = 0;
+        close(sock);
+        return;
+    }
+}
+
+/* W6100 초기화 후 TCP 명령 처리 */
 void Net_TaskRun(void *argument)
 {
     uint8_t mem[16] = {
@@ -334,19 +219,23 @@ void Net_TaskRun(void *argument)
 
     (void)argument;
 
-    osDelay(500);
+    /*
+     * CLI 메뉴 출력 후 NET 로그를 출력하기 위해 대기.
+     * 순서: CLI 메뉴 -> > 프롬프트 -> NET 로그
+     */
+    while (CLI_IsReady() == 0)
+    {
+        osDelay(1);
+    }
 
     printf("[NET] start\r\n");
 
-    (void)Fram_InitPins();
-
-    if (Fram_ReadStatus(&hspi3, &status) == HAL_OK)
+    if (St_Stat(&status) == HAL_OK)
     {
         printf("[NET] FRAM status=0x%02X\r\n", status);
     }
 
-    if (MacEeprom_ReadMac(&hi2c1, netinfo.mac) != HAL_OK ||
-        MacEeprom_IsMacPlausible(netinfo.mac) == 0)
+    if (mac() != HAL_OK || mac_ok() == 0)
     {
         printf("[NET] MAC fail\r\n");
 
@@ -357,12 +246,12 @@ void Net_TaskRun(void *argument)
     }
 
     printf("[NET] MAC %02X:%02X:%02X:%02X:%02X:%02X\r\n",
-           netinfo.mac[0],
-           netinfo.mac[1],
-           netinfo.mac[2],
-           netinfo.mac[3],
-           netinfo.mac[4],
-           netinfo.mac[5]);
+           info.mac[0],
+           info.mac[1],
+           info.mac[2],
+           info.mac[3],
+           info.mac[4],
+           info.mac[5]);
 
     W6100_RegisterCallback();
     W6100_Reset();
@@ -372,22 +261,18 @@ void Net_TaskRun(void *argument)
         printf("[NET] W6100 init fail\r\n");
     }
 
-    Net_SetInfo();
+    set();
 
     printf("[NET] IP %u.%u.%u.%u PORT %u\r\n",
-           netinfo.ip[0],
-           netinfo.ip[1],
-           netinfo.ip[2],
-           netinfo.ip[3],
-           TCP_PORT);
+           info.ip[0],
+           info.ip[1],
+           info.ip[2],
+           info.ip[3],
+           (unsigned int)port);
 
     for (;;)
     {
-        (void)TcpCmdServer_Process(TCP_SOCKET,
-                                   tcp_buf,
-                                   TCP_PORT,
-                                   TCP_CMD_MODE_IPV4);
-
+        tcp();
         osDelay(1);
     }
 }
