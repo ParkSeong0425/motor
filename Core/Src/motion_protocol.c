@@ -460,9 +460,6 @@ void MotionProtocol_ProcessCommand(const char *cmd_in, char *res, size_t size)
                      "01P_OFF_S\r\n" : "01E_PWR\r\n");
         else snprintf(res, size, "01E_PWR_ARG\r\n");
     }
-    else if (strcmp(cmd, "01D28") == 0)
-        snprintf(res, size,
-                 (Motor_Do28(&huart5) == HAL_OK) ? "01D28_S\r\n" : "01E_D28\r\n");
     else if (strcmp(cmd, "01ECLR") == 0)
     {
         MotionProtocol_StopLoop();

@@ -195,6 +195,13 @@ static HAL_StatusTypeDef MotorSendReceive(UART_HandleTypeDef *huart,
                                tx_len,
                                MOTOR_TX_TIMEOUT_MS);
 
+    if (result == HAL_OK)
+    {
+        while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC) == RESET);
+
+        for (volatile uint32_t i = 0; i < 20; i++);
+    }
+
     MotorRs485_SetRx();
 
     if (result == HAL_OK)
@@ -409,32 +416,55 @@ HAL_StatusTypeDef MotorBus_ReadI32(UART_HandleTypeDef *huart,
     return HAL_OK;
 }
 
-/* 모터 Enable ON/OFF raw frame 송신 */
+/* [수정] 모터 Enable ON/OFF를 0x06 Function Code 기반 새 프레임으로 송신 */
 HAL_StatusTypeDef MotorBus_Power(UART_HandleTypeDef *huart, uint8_t on)
 {
-    uint8_t p_on[11] =
-        {0x01,0x10,0x32,0x01,0x00,0x01,0x02,0x00,0x01,0x75,0x82};
+    // 입력받은 정적 헥사 프레임 적용 (8바이트 구조)
+    uint8_t p_on[8] =
+        {0x01, 0x06, 0x03, 0x03, 0x00, 0x01, 0xB8, 0x4E};
 
-    uint8_t p_off[11] =
-        {0x01,0x10,0x32,0x01,0x00,0x01,0x02,0x00,0x00,0xB4,0x42};
+    uint8_t p_off[8] =
+        {0x01, 0x06, 0x03, 0x03, 0x00, 0x00, 0x79, 0x8E};
 
     uint8_t rx[8];
     uint8_t *tx;
     HAL_StatusTypeDef r;
 
+    motor_debug.last_reg = 0x0303;
+    motor_debug.exception_code = 0;
+    motor_debug.crc_ok = 0;
+
     tx = (on != 0u) ? p_on : p_off;
 
-    r = MotorSendReceive(huart, tx, 11, rx, 8);
+    // 송신 패킷 크기를 11에서 8바이트로, 수신 버퍼 크기를 8바이트로 세팅
+    r = MotorSendReceive(huart, tx, 8, rx, 8);
     if (r != HAL_OK) return r;
 
     if (rx[0] != 0x01) return HAL_ERROR;
-    if (rx[1] != 0x10) return HAL_ERROR;
-    if (rx[2] != 0x32) return HAL_ERROR;
-    if (rx[3] != 0x01) return HAL_ERROR;
-    if (rx[4] != 0x00) return HAL_ERROR;
-    if (rx[5] != 0x01) return HAL_ERROR;
 
-    return CheckCrc(rx, 8);
+    // 모터의 예외 응답(0x86) 처리 예외 규격 검증
+    if (rx[1] == 0x86)
+    {
+        motor_debug.exception_code = rx[2];
+        return HAL_ERROR;
+    }
+
+    // Function Code가 0x06이 맞는지 및 CRC 유효성 검사
+    if (rx[1] != 0x06 || CheckCrc(rx, 8) != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    // 0x06 스펙에 따라 응답 프레임이 송신 에코 데이터와 완벽히 일치하는지 확인 (앞 6바이트)
+    for (uint8_t i = 0; i < 6; i++)
+    {
+        if (rx[i] != tx[i])
+        {
+            return HAL_ERROR;
+        }
+    }
+
+    return HAL_OK;
 }
 
 void RS485_Init(void)
