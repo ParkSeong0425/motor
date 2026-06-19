@@ -18,7 +18,7 @@ static char line_buf[LINE_SIZE];
 static uint16_t line_len = 0;
 static volatile uint8_t cli_ready = 0;
 
-/* 공백 기준으로 단어 분리 */
+/* 공백 기준 단어 분리 */
 static int cut(char *line, char *word[])
 {
     int count = 0;
@@ -33,19 +33,18 @@ static int cut(char *line, char *word[])
     return count;
 }
 
-/* uint32 숫자 읽기 */
+/* uint32 읽기 */
 static uint8_t u32(const char *text, uint32_t *out)
 {
     char *end;
     unsigned long value = strtoul(text, &end, 0);
 
     if (*end != '\0') return 0;
-
     *out = (uint32_t)value;
     return 1;
 }
 
-/* protocol 명령 보내고 응답 출력 */
+/* protocol 명령 실행 */
 static void proto(const char *cmd)
 {
     char reply[REPLY_SIZE];
@@ -60,15 +59,18 @@ static void help(void)
     printf("\r\n");
     printf("set\r\n");
     printf("wheel <dia_mm>\r\n");
+    printf("zero\r\n");
+    printf("home\r\n");
     printf("in <mm>\r\n");
     printf("save <mm1> [mm2...]\r\n");
     printf("show\r\n");
     printf("go <save_num> <speed>\r\n");
     printf("run <save_num> <speed>\r\n");
-    printf("home\r\n");
+    printf("do28\r\n");
     printf("power on|off\r\n");
     printf("stop\r\n");
     printf("pos\r\n");
+    printf("estop clear\r\n");
     printf("clear\r\n");
     printf("\r\n");
 }
@@ -82,7 +84,7 @@ static void pos(void)
     else printf("pos read fail\r\n");
 }
 
-/* wheel 명령: 바퀴 지름(mm) 저장 */
+/* wheel 저장 */
 static void wheel(int count, char *word[])
 {
     char cmd[CMD_SIZE];
@@ -98,7 +100,7 @@ static void wheel(int count, char *word[])
     proto(cmd);
 }
 
-/* in 명령: 입고 위치(mm) 저장 */
+/* 입고 위치 저장 */
 static void inpos(int count, char *word[])
 {
     char cmd[CMD_SIZE];
@@ -113,7 +115,7 @@ static void inpos(int count, char *word[])
     proto(cmd);
 }
 
-/* save 명령: 출고 위치(mm) 목록 저장 */
+/* 출고 위치 저장 */
 static void save(int count, char *word[])
 {
     char cmd[CMD_SIZE];
@@ -131,18 +133,20 @@ static void save(int count, char *word[])
     for (int i = 1; i < count; i++)
     {
         add = snprintf(&cmd[used], sizeof(cmd) - (size_t)used, "_%s", word[i]);
+
         if (add < 0 || (used + add) >= (int)sizeof(cmd))
         {
             printf("too long\r\n");
             return;
         }
+
         used += add;
     }
 
     proto(cmd);
 }
 
-/* go 명령: 저장 위치로 1회 이동 */
+/* 저장 위치로 1회 이동 */
 static void go(int count, char *word[])
 {
     char cmd[CMD_SIZE];
@@ -155,15 +159,14 @@ static void go(int count, char *word[])
         return;
     }
 
-    snprintf(cmd,
-             sizeof(cmd),
+    snprintf(cmd, sizeof(cmd),
              "01MO_1_%lu_%lu_0_0",
              (unsigned long)num,
              (unsigned long)speed);
     proto(cmd);
 }
 
-/* run 명령: stop 전까지 왕복 */
+/* run 왕복 */
 static void run_loop(int count, char *word[])
 {
     uint32_t num;
@@ -192,7 +195,7 @@ static void power(int count, char *word[])
     else printf("power on|off\r\n");
 }
 
-/* 입력된 한 줄 실행 */
+/* 한 줄 실행 */
 static void run(char *line)
 {
     char *word[WORD_MAX];
@@ -203,16 +206,20 @@ static void run(char *line)
     if (strcmp(word[0], "help") == 0) help();
     else if (strcmp(word[0], "set") == 0) printf("set=%d\r\n", Motor_Setup(&huart5));
     else if (strcmp(word[0], "wheel") == 0) wheel(count, word);
+    else if (strcmp(word[0], "zero") == 0) proto("01ZERO");
+    else if (strcmp(word[0], "home") == 0) proto("01HOME");
     else if (strcmp(word[0], "in") == 0) inpos(count, word);
     else if (strcmp(word[0], "save") == 0) save(count, word);
     else if (strcmp(word[0], "show") == 0) proto("01Q");
     else if (strcmp(word[0], "go") == 0) go(count, word);
     else if (strcmp(word[0], "run") == 0) run_loop(count, word);
-    else if (strcmp(word[0], "home") == 0) proto("01HOME");
+    else if (strcmp(word[0], "do28") == 0) proto("01D28");
     else if (strcmp(word[0], "power") == 0) power(count, word);
     else if (strcmp(word[0], "stop") == 0) proto("01STOP");
     else if (strcmp(word[0], "pos") == 0) pos();
     else if (strcmp(word[0], "clear") == 0) proto("01I");
+    else if (strcmp(word[0], "estop") == 0 &&
+             count >= 2 && strcmp(word[1], "clear") == 0) proto("01ECLR");
     else printf("?\r\n");
 }
 
@@ -228,12 +235,12 @@ uint8_t CLI_IsReady(void)
     return cli_ready;
 }
 
-/* CLI 초기 출력 */
+/* CLI 초기 출력: 자동 help는 안 찍고 prompt만 */
 void CLI_Init(void)
 {
-    help();
-    printf("> ");
-    CLI_SetReady();
+    if (cli_ready != 0) return;
+    cli_ready = 1;
+    printf("\r\n> ");
 }
 
 /* UART 문자 1개씩 받아 한 줄 명령 처리 */
@@ -295,9 +302,6 @@ void CLI_Poll(void)
     if (ch >= 32 && ch <= 126 && line_len < (LINE_SIZE - 1))
     {
         line_buf[line_len++] = (char)ch;
-
-        /* Local Echo를 켜려면 아래 줄 주석 해제 */
-        /* printf("%c", ch); */
     }
 }
 

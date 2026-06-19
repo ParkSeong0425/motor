@@ -57,21 +57,21 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define DI_3_Pin GPIO_PIN_3
-#define DI_3_GPIO_Port GPIOE
-#define DI_1_Pin GPIO_PIN_5
-#define DI_1_GPIO_Port GPIOE
-#define DI_2_Pin GPIO_PIN_6
-#define DI_2_GPIO_Port GPIOE
 #define DI_3_btn_Pin GPIO_PIN_13
 #define DI_3_btn_GPIO_Port GPIOC
 #define DI_3_btn_EXTI_IRQn EXTI15_10_IRQn
-#define DI_5_Pin GPIO_PIN_7
-#define DI_5_GPIO_Port GPIOF
-#define DI_4_Pin GPIO_PIN_8
-#define DI_4_GPIO_Port GPIOF
+#define DO3_mon_Pin GPIO_PIN_3
+#define DO3_mon_GPIO_Port GPIOF
+#define DO4_moff_Pin GPIO_PIN_5
+#define DO4_moff_GPIO_Port GPIOF
+#define DO1_home_Pin GPIO_PIN_0
+#define DO1_home_GPIO_Port GPIOC
+#define DO2_Estop_Pin GPIO_PIN_3
+#define DO2_Estop_GPIO_Port GPIOC
 #define W610_CS_Pin GPIO_PIN_0
 #define W610_CS_GPIO_Port GPIOA
+#define DO0_zero_Pin GPIO_PIN_3
+#define DO0_zero_GPIO_Port GPIOA
 #define FRAM_CS_Pin GPIO_PIN_4
 #define FRAM_CS_GPIO_Port GPIOA
 #define RS485_3_Pin GPIO_PIN_12

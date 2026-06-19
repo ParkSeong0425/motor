@@ -409,6 +409,34 @@ HAL_StatusTypeDef MotorBus_ReadI32(UART_HandleTypeDef *huart,
     return HAL_OK;
 }
 
+/* 모터 Enable ON/OFF raw frame 송신 */
+HAL_StatusTypeDef MotorBus_Power(UART_HandleTypeDef *huart, uint8_t on)
+{
+    uint8_t p_on[11] =
+        {0x01,0x10,0x32,0x01,0x00,0x01,0x02,0x00,0x01,0x75,0x82};
+
+    uint8_t p_off[11] =
+        {0x01,0x10,0x32,0x01,0x00,0x01,0x02,0x00,0x00,0xB4,0x42};
+
+    uint8_t rx[8];
+    uint8_t *tx;
+    HAL_StatusTypeDef r;
+
+    tx = (on != 0u) ? p_on : p_off;
+
+    r = MotorSendReceive(huart, tx, 11, rx, 8);
+    if (r != HAL_OK) return r;
+
+    if (rx[0] != 0x01) return HAL_ERROR;
+    if (rx[1] != 0x10) return HAL_ERROR;
+    if (rx[2] != 0x32) return HAL_ERROR;
+    if (rx[3] != 0x01) return HAL_ERROR;
+    if (rx[4] != 0x00) return HAL_ERROR;
+    if (rx[5] != 0x01) return HAL_ERROR;
+
+    return CheckCrc(rx, 8);
+}
+
 void RS485_Init(void)
 {
     CliRs485_SetRx();

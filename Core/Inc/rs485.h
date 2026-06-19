@@ -30,6 +30,9 @@ HAL_StatusTypeDef MotorBus_ReadI32(UART_HandleTypeDef *huart,
                                    uint16_t reg,
                                    int32_t *value);
 
+HAL_StatusTypeDef MotorBus_Power(UART_HandleTypeDef *huart,
+								 uint8_t on);
+
 #define RS485_SetTx       CliRs485_SetTx
 #define RS485_SetRx       CliRs485_SetRx
 #define RS485_Transmit    CliRs485_Write
@@ -38,6 +41,9 @@ HAL_StatusTypeDef MotorBus_ReadI32(UART_HandleTypeDef *huart,
 #define Bus_Write16       MotorBus_WriteU16
 #define Bus_Write32       MotorBus_WriteI32
 #define Bus_Read32        MotorBus_ReadI32
+
+#define Bus_Power MotorBus_Power
+
 
 #ifdef __cplusplus
 }

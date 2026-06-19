@@ -228,7 +228,7 @@ void Net_TaskRun(void *argument)
         osDelay(1);
     }
 
-    printf("[NET] start\r\n");
+    printf("\r\n[NET] start\r\n");
 
     if (St_Stat(&status) == HAL_OK)
     {

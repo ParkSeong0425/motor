@@ -18,9 +18,6 @@ extern "C" {
 #define LIFT_MIN_PERCENT     10
 #define LIFT_MAX_PERCENT     100
 
-#define MOTOR_GPIO_ON        GPIO_PIN_RESET
-#define MOTOR_GPIO_OFF       GPIO_PIN_SET
-
 typedef enum
 {
     MOTOR_CMD_NONE = 0,
@@ -71,18 +68,29 @@ extern osMessageQueueId_t MotorQueueHandle;
 void Motor_TaskRun(void *argument);
 void Motor_InitIO(void);
 void Motor_ClearEStop(void);
+
 HAL_StatusTypeDef Motor_Setup(UART_HandleTypeDef *huart);
 HAL_StatusTypeDef Motor_Power(UART_HandleTypeDef *huart, uint8_t on);
+HAL_StatusTypeDef Motor_Zero(UART_HandleTypeDef *huart);
 HAL_StatusTypeDef Motor_Home(UART_HandleTypeDef *huart);
+HAL_StatusTypeDef Motor_Do28(UART_HandleTypeDef *huart);
+
 HAL_StatusTypeDef Motor_Start(UART_HandleTypeDef *huart,
                               int32_t target,
                               uint8_t speed,
                               uint16_t acc_ms);
 HAL_StatusTypeDef Motor_Stop(UART_HandleTypeDef *huart);
 HAL_StatusTypeDef Motor_ReadPos(UART_HandleTypeDef *huart, int32_t *pos);
+
 uint8_t Motor_IsBusy(void);
 uint8_t Motor_IsEStop(void);
+uint8_t Motor_IsHold(void);
+int32_t Motor_HoldPos(void);
+void Motor_ClearHold(void);
+
 int32_t Motor_mmToUnit(int32_t mm);
+int32_t Motor_TargetUnit(int32_t mm);
+
 osStatus_t Motor_SendMove(int32_t target,
                           uint32_t speed,
                           uint32_t acc_ms,
