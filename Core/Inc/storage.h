@@ -11,6 +11,7 @@ HAL_StatusTypeDef St_Init(void);
 HAL_StatusTypeDef St_Load(void);
 HAL_StatusTypeDef St_Save(void);
 HAL_StatusTypeDef St_Stat(uint8_t *status);
+HAL_StatusTypeDef St_ClearAll(void);
 
 uint32_t St_Dia(void);
 void St_SetDia(uint32_t dia_mm);
